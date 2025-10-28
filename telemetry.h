@@ -1,15 +1,18 @@
 #ifndef TELEMETRY_H
 #define TELEMETRY_H
 
-#include <WebServer.h>
+// #include <WebServer.h> // <-- DELETED THIS LINE
 #include <ArduinoJson.h>
 #include <TinyGPSPlus.h> // MOVED HERE
 #include <Preferences.h>
 #include <SPIFFS.h>
 #include "types.h"
 
+// Forward declare WebServer class
+class WebServer;
+
 // External Global Object Declarations
-extern WebServer server;
+extern WebServer server; // Declaration is okay here
 extern TinyGPSPlus gps; // NOW EXTERN
 extern Preferences preferences;
 extern portMUX_TYPE boatStatusMutex;
@@ -21,7 +24,7 @@ extern BoatStatus boatStatus;
 extern SavedLocation savedLocations[5];
 extern PIDController steeringPID;
 extern Route currentRoute;
-extern AlertSetting alertSettings[NUM_ALERT_TYPES]; 
+extern AlertSetting alertSettings[NUM_ALERT_TYPES];
 extern char ssid[];
 
 // External Function Declarations

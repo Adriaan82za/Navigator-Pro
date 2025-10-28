@@ -1,6 +1,8 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+#include "types.h"
+
 // ==================================
 // RC Control Settings
 // ==================================
@@ -36,9 +38,28 @@ const float BRAKING_DURATION_MS_PER_MPS = 250.0; // Milliseconds of braking per 
 const unsigned long MIN_BRAKING_DURATION_MS = 200; // A short burst even at low speed.
 const unsigned long MAX_BRAKING_DURATION_MS = 1000; // Max braking time to prevent stalling.
 
+// Settings persistence debounce
+const unsigned long SETTINGS_SAVE_DEBOUNCE_MS = 10000;
+
+// Light masks (for shift register control)
+const byte HEADLIGHTS_MASK        = (1 << HEADLIGHTS);
+const byte FRONT_LEFT_LIGHT_MASK  = (1 << FRONT_LEFT_LIGHT);
+const byte FRONT_RIGHT_LIGHT_MASK = (1 << FRONT_RIGHT_LIGHT);
+const byte REAR_LEFT_LIGHT_MASK   = (1 << REAR_LEFT_LIGHT);
+const byte REAR_RIGHT_LIGHT_MASK  = (1 << REAR_RIGHT_LIGHT);
+const byte BUZZER_MASK            = (1 << BUZZER);
+const byte ALL_LIGHTS_MASK = HEADLIGHTS_MASK | FRONT_LEFT_LIGHT_MASK | FRONT_RIGHT_LIGHT_MASK | REAR_LEFT_LIGHT_MASK | REAR_RIGHT_LIGHT_MASK;
+const byte LEFT_LIGHTS_MASK = FRONT_LEFT_LIGHT_MASK | REAR_LEFT_LIGHT_MASK;
+const byte RIGHT_LIGHTS_MASK = FRONT_RIGHT_LIGHT_MASK | REAR_RIGHT_LIGHT_MASK;
 
 // ESC Pulse Width Range
 const int ESC_MIN_PULSE = 900;
 const int ESC_MAX_PULSE = 2100;
+
+// ==================================
+// Function Declarations
+// ==================================
+void loadAllSettings();
+void handleSettingsPersistence(BoatStatus& status);
 
 #endif

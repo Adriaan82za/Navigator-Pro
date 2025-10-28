@@ -3,8 +3,8 @@
  * Description: This file handles core setup, main loop, and hardware interfaces.
  * Now using a dedicated core for iBus and WebServer to ensure system stability.
  * Author: [Adriaan v.d.Westhuizen] & Gemini
- * Date: October 24, 2025
- * Version: 12.1.4 (Robust Anchor Mode with Drift Compensation)
+ * Date: October 28, 2025
+ * Version: 12.1.5 (Modularized)
  */
 
 #include <HardwareSerial.h>
@@ -15,23 +15,18 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <TinyGPSPlus.h>
-#include <WebServer.h>
+#include <WebServer.h> // <-- ADDED THIS LINE
 #include <SPIFFS.h>
 #include <WMM_Tinier.h>
 
 #include "types.h"
+#include "config.h"
+#include "imu.h"
+#include "gps.h"
+#include "nav_webserver.h" // <-- CHANGED THIS LINE
 #include "telemetry.h"
 #include "autopilot.h"
-#include "config.h"
 #include "kalman.h"
-
-// ==============================
-// BNO08x Configuration
-// ==============================
-#define BNO08X_RESET -1 // Set to -1 to disable reset pin and resolve conflict
-#define I2C_SDA 21
-#define I2C_SCL 22
-#define BNO08X_I2C_ADDRESS 0x4B
 
 // ==============================
 // Configuration Constants
@@ -56,29 +51,13 @@ const int ADC_RES = 4095, VOLTAGE_SAMPLES = 10;
 #define SR_RCLK 33
 #define SR_SRCLK 32
 
-const int MIN_SATELLITES = 6;
-const float MAX_HDOP = 2.0;
-const unsigned long GPS_VALIDITY_TIMEOUT = 30000;
 const unsigned long IBUS_TIMEOUT = 100;
-const int GPS_READ_MAX_CHARS = 80;
 const unsigned long LOW_BATT_DEBOUNCE_MS = 3000;
 const int FAILSAFE_CHANNEL_THRESHOLD = 1700;
-const byte HEADLIGHTS_MASK        = (1 << HEADLIGHTS);
-const byte FRONT_LEFT_LIGHT_MASK  = (1 << FRONT_LEFT_LIGHT);
-const byte FRONT_RIGHT_LIGHT_MASK = (1 << FRONT_RIGHT_LIGHT);
-const byte REAR_LEFT_LIGHT_MASK   = (1 << REAR_LEFT_LIGHT);
-const byte REAR_RIGHT_LIGHT_MASK  = (1 << REAR_RIGHT_LIGHT);
-const byte BUZZER_MASK            = (1 << BUZZER);
-const byte ALL_LIGHTS_MASK = HEADLIGHTS_MASK | FRONT_LEFT_LIGHT_MASK | FRONT_RIGHT_LIGHT_MASK | REAR_LEFT_LIGHT_MASK | REAR_RIGHT_LIGHT_MASK;
-const byte LEFT_LIGHTS_MASK = FRONT_LEFT_LIGHT_MASK | REAR_LEFT_LIGHT_MASK;
-const byte RIGHT_LIGHTS_MASK = FRONT_RIGHT_LIGHT_MASK | REAR_RIGHT_LIGHT_MASK;
-
 const unsigned long ACTUATOR_COOLDOWN_MS = 2000;
 const float MOTOR_SMOOTHING_ALPHA = 0.2;
-const unsigned long SETTINGS_SAVE_DEBOUNCE_MS = 10000;
 const unsigned long FAILSAFE_RTH_TRIGGER_MS = 5000;
 const unsigned long LOOP_INTERVAL_MS = 5;
-
 // ==============================
 // Global Objects
 // ==============================
@@ -128,14 +107,7 @@ volatile unsigned long last_ibus_packet_ms = 0;
 
 // Forward Declarations
 void ibus_task(void *pvParameters);
-void webserver_task(void *pvParameters);
-void loadAllSettings();
-void setupIO();
-void setupESCs();
-void setupLightsAndBuzzer();
 void processIbusData();
-void handleGPS(BoatStatus& status);
-void handleIMU(BoatStatus& status);
 void handleModes(BoatStatus& status);
 void updateMotors(BoatStatus& status);
 void handleManualActuators(BoatStatus& status);
@@ -146,13 +118,12 @@ float readBatteryVoltage();
 void startBuzzerPattern(BuzzerPatternControl& pattern, const AlertSetting& settings);
 void startFlashPattern(FlashPatternControl& pattern, const AlertSetting& settings);
 void startActuator(Actuator &actuator);
-void handleSettingsPersistence(BoatStatus& status);
-void setupWifi();
+void setupIO();
+void setupESCs();
+void setupLightsAndBuzzer();
 void voidMotors();
 void handleManualPidTuning(BoatStatus& status);
 void handleDynamicPID(BoatStatus& status);
-void setBNO08xReports();
-void updateMagneticDeclination();
 void handleArming(BoatStatus& status);
 void handleCompassReturn(BoatStatus& status);
 void updateSingleBuzzerPattern(BuzzerPatternControl& pattern);
@@ -170,33 +141,24 @@ void setup() {
     while(1) delay(1000);
   }
 
-  if (wmm.begin()) {
-    // WMM_Tinier Initialized
-  } else {
-    Serial.println("WMM_Tinier Initialization failed!");
-  }
-
-  gpsSerial.begin(9600, SERIAL_8N1, 16, 17);
+  setupGPS();
   setupIO();
   setupLightsAndBuzzer();
-
   xTaskCreatePinnedToCore(ibus_task, "iBusTask", 4096, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(webserver_task, "WebServerTask", 8192, NULL, 1, NULL, 0);
 
   delay(500);
   processIbusData();
   if (boatStatus.rc.channels[CH6] > WIFI_RESET_THRESHOLD) {
-     portENTER_CRITICAL(&nvsMutex); // <<< FIX: Protect NVS access
+     portENTER_CRITICAL(&nvsMutex);
      preferences.begin("baitboat", false);
      preferences.remove("wifi_ssid");
      preferences.remove("wifi_pass");
      preferences.end();
-     portEXIT_CRITICAL(&nvsMutex); // <<< FIX: Release NVS access
-
+     portEXIT_CRITICAL(&nvsMutex);
      for(int i=0; i<5; i++) {
         byte flashOnState = BUZZER_MASK;
         byte flashOffState = ~ALL_LIGHTS_MASK;
-
         digitalWrite(SR_RCLK, LOW);
         shiftOut(SR_SER, SR_SRCLK, MSBFIRST, flashOnState);
         digitalWrite(SR_RCLK, HIGH);
@@ -209,14 +171,7 @@ void setup() {
      }
   }
 
-  Wire.begin(I2C_SDA, I2C_SCL);
-  if (!bno08x.begin_I2C(BNO08X_I2C_ADDRESS)) {
-      imuConnected = false;
-      Serial.println("BNO08x connection failed.");
-  } else {
-      imuConnected = true;
-      setBNO08xReports();
-  }
+  setupIMU();
 
   loadAllSettings();
   setupESCs();
@@ -233,10 +188,7 @@ void loop() {
     lastLoopTime = millis();
     // --- 1. SENSOR READS AND STATE UPDATES (ALWAYS RUN) ---
     if (!imuConnected) {
-      if (bno08x.begin_I2C(BNO08X_I2C_ADDRESS)) {
-        imuConnected = true;
-        setBNO08xReports();
-      }
+      imuConnected = setupIMU();
     }
     if (imuConnected) {
       handleIMU(boatStatus);
@@ -244,7 +196,7 @@ void loop() {
 
     processIbusData();
     handleGPS(boatStatus);
-    updateMagneticDeclination();
+    updateMagneticDeclination(boatStatus);
     handleModes(boatStatus);
     handleSystemChecks(boatStatus);
     handleArming(boatStatus);
@@ -253,6 +205,7 @@ void loop() {
     bool explicit_failsafe_active = (boatStatus.rc.channels[CH1] > FAILSAFE_CHANNEL_THRESHOLD &&
                                      boatStatus.rc.channels[CH2] > FAILSAFE_CHANNEL_THRESHOLD &&
                                      boatStatus.rc.channels[CH3] > FAILSAFE_CHANNEL_THRESHOLD &&
+
                                      boatStatus.rc.channels[CH4] > FAILSAFE_CHANNEL_THRESHOLD);
     if (explicit_failsafe_active || (millis() - boatStatus.rc.last_update_ms > IBUS_TIMEOUT)) {
         if (explicit_failsafe_active) {
@@ -271,7 +224,8 @@ void loop() {
                 handleCompassReturn(boatStatus);
             }
         }
-        updateLights(); // Still update lights in failsafe.
+        updateLights();
+        // Still update lights in failsafe.
         return; // Skip normal motor control logic.
     } else {
         // Reset failsafe timers if signal is good
@@ -281,7 +235,8 @@ void loop() {
     }
 
     // --- 3. NORMAL OPERATION (if not in failsafe) ---
-    if (millis() < 2000) return; // Short delay on boot to let systems stabilize
+    if (millis() < 2000) return;
+    // Short delay on boot to let systems stabilize
 
     handleManualPidTuning(boatStatus);
     handleDynamicPID(boatStatus);
@@ -290,7 +245,8 @@ void loop() {
     updateActuators();
     handleSettingsPersistence(boatStatus);
     // --- 4. FINAL UPDATES ---
-    updateLights(); // Update lights based on normal operation state
+    updateLights();
+    // Update lights based on normal operation state
 
     boatStatus.rc.prev_stick_ch1 = boatStatus.rc.channels[CH1];
     boatStatus.rc.prev_stick_ch2 = boatStatus.rc.channels[CH2];
@@ -341,16 +297,6 @@ void ibus_task(void *pvParameters) {
 
 // ==========================================
 // Web Server Task (runs exclusively on Core 0)
-// ==========================================
-void webserver_task(void *pvParameters) {
-    setupWifi();
-    setupWebServerRoutes();
-    while(true) {
-        server.handleClient();
-        vTaskDelay(2 / portTICK_PERIOD_MS);
-    }
-}
-
 
 // ==============================
 // Functions (running on Core 1)
@@ -384,104 +330,6 @@ void handleArming(BoatStatus& status) {
   }
 }
 
-void updateMagneticDeclination() {
-  if (gps.location.isValid() && gps.date.isValid()) {
-    uint16_t current_year = gps.date.year();
-    uint8_t year_for_calc;
-    if (current_year < 2025) {
-        year_for_calc = 25;
-    } else {
-        year_for_calc = current_year % 100;
-    }
-
-    boatStatus.nav.magnetic_declination = wmm.magneticDeclination(
-        gps.location.lat(),
-        gps.location.lng(),
-        year_for_calc,
-        gps.date.month(),
-        gps.date.day()
-    );
-  }
-}
-
-void setBNO08xReports() {
-  if (!bno08x.enableReport(SH2_ROTATION_VECTOR, 10000)) {
-    Serial.println("Could not enable rotation vector");
-  }
-  if (!bno08x.enableReport(SH2_LINEAR_ACCELERATION, 10000)) {
-    Serial.println("Could not enable linear acceleration");
-  }
-}
-
-// =================================================================
-// START OF CHANGE: Updated handleIMU from user-provided file
-// =================================================================
-void handleIMU(BoatStatus& status) {
-  static unsigned long lastPredictTime = 0;
-  if (bno08x.getSensorEvent(&sensorValue)) {
-    if (sensorValue.sensorId == SH2_ROTATION_VECTOR) {
-      status.nav.imu_accuracy = sensorValue.status & 0b00000011;
-      float q_i = sensorValue.un.rotationVector.i;
-      float q_j = sensorValue.un.rotationVector.j;
-      float q_k = sensorValue.un.rotationVector.k;
-      float q_real = sensorValue.un.rotationVector.real;
-      float yaw_rad = atan2(2.0 * (q_i * q_j + q_real * q_k),
-                            q_real * q_real + q_i * q_i - q_j * q_j - q_k * q_k);
-      float yaw_deg = yaw_rad * (180.0 / PI);
-
-      // --- FIXED: Removed yaw_deg = 90.0 - yaw_deg; to correct 90° offset ---
-      // If mounting requires rotation, add a prefs-based offset instead, e.g.:
-      // yaw_deg += preferences.getFloat("heading_offset", 0.0);
-
-      float final_heading = yaw_deg + status.nav.magnetic_declination;
-      if(final_heading >= 360.0) final_heading -= 360.0;
-      if(final_heading < 0.0) final_heading += 360.0;
-      status.nav.heading = final_heading;
-      float sinr_cosp = 2 * (q_real * q_i + q_j * q_k);
-      float cosr_cosp = 1 - 2 * (q_i * q_i + q_j * q_j);
-      status.nav.roll = atan2(sinr_cosp, cosr_cosp) * (180.0 / PI);
-
-      float sinp = 2 * (q_real * q_j - q_k * q_i);
-      float pitch_val;
-      if (abs(sinp) >= 1)
-        pitch_val = copysign(M_PI / 2, sinp) * (180.0 / PI);
-      else
-        pitch_val = asin(sinp) * (180.0 / PI);
-      // --- User's Transformation for Pitch ---
-      status.nav.pitch = pitch_val * -1.0;
-      // --- End Transformation ---
-
-    } else if (sensorValue.sensorId == SH2_LINEAR_ACCELERATION) {
-        // <<< FIX: Removed 'status.nav.has_gps_fix' check.
-        // Prediction should run even without GPS (dead reckoning).
-        if (lastPredictTime > 0) {
-            float dt = (micros() - lastPredictTime) / 1000000.0f;
-            float acc_x = sensorValue.un.linearAcceleration.x;
-            float acc_y = sensorValue.un.linearAcceleration.y;
-
-            // Use the final calculated heading (which includes user transformations)
-            // to rotate accelerations for the Kalman filter.
-            float heading_rad = status.nav.heading * PI / 180.0;
-            float cos_h = cos(heading_rad);
-            float sin_h = sin(heading_rad);
-            float acc_n = acc_x * cos_h - acc_y * sin_h;
-            float acc_e = acc_x * sin_h + acc_y * cos_h;
-            kalman_predict(kf, dt, acc_n, acc_e);
-
-            status.nav.latitude = kf.x[0];
-            status.nav.longitude = kf.x[1];
-            double vel_lat_mps = kf.x[2] * (M_PI / 180.0) * 6371000.0;
-            double vel_lon_mps = kf.x[3] * (M_PI / 180.0) * 6371000.0 * cos(kf.x[0] * M_PI / 180.0);
-            status.nav.speed_mps = sqrt(pow(vel_lat_mps, 2) + pow(vel_lon_mps, 2));
-        }
-        lastPredictTime = micros();
-    }
-  }
-}
-// =================================================================
-// END OF CHANGE: Updated handleIMU
-// =================================================================
-
 void handleManualPidTuning(BoatStatus& status) {
     if (status.mode.current == MANUAL_MODE || status.mode.current == LOCATION_SAVE_MODE) {
         steeringPID.Kp = map(status.rc.channels[CH9], 1000, 2000, 100, 700) / 100.0;
@@ -507,130 +355,6 @@ void handleDynamicPID(BoatStatus& status) {
         float factor = (currentSpeed - lowSpeedThreshold) / (highSpeedThreshold - lowSpeedThreshold);
         steeringPID.Kp = baseKp * (1.0 - (highSpeedKpReduction * factor));
     }
-}
-
-void setupWifi() {
-  portENTER_CRITICAL(&nvsMutex); // <<< FIX: Protect NVS access
-  preferences.begin("baitboat", true);
-  String ap_ssid = preferences.getString("wifi_ssid", "Navigator-Pro");
-  String ap_pass = preferences.getString("wifi_pass", "Nav@1234!");
-  preferences.end();
-  portEXIT_CRITICAL(&nvsMutex); // <<< FIX: Release NVS access
-
-  if (ap_pass.length() > 0 && ap_pass.length() < 8) {
-      ap_pass = "Nav@1234!";
-  }
-
-  strncpy(ssid, ap_ssid.c_str(), sizeof(ssid)-1);
-  ssid[sizeof(ssid)-1] = '\0';
-
-  WiFi.softAP(ap_ssid.c_str(), ap_pass.c_str());
-}
-
-void handleSettingsPersistence(BoatStatus& status) {
-  if (status.persistence.settings_dirty && (millis() - status.persistence.last_change_ms > SETTINGS_SAVE_DEBOUNCE_MS)) {
-
-    portENTER_CRITICAL(&nvsMutex); // <<< FIX: Protect NVS access
-    preferences.begin("baitboat", false);
-    preferences.putFloat("pid_p", steeringPID.Kp);
-    preferences.putFloat("pid_i", steeringPID.Ki);
-    preferences.putFloat("pid_d", steeringPID.Kd);
-    preferences.putFloat("low_batt", status.mode.low_battery_threshold);
-    preferences.putBool("lb_rth_en", status.autopilot.low_battery_rth_enabled);
-    const char* keys[] = {"hs", "ws", "gf", "ae", "lh", "rh", "lk", "rk", "lb", "wr", "ar"};
-    char key_buffer[25];
-    for(int i = 0; i < NUM_ALERT_TYPES; i++){
-        snprintf(key_buffer, sizeof(key_buffer), "%s_b", keys[i]);
-        preferences.putInt(key_buffer, alertSettings[i].beeps);
-        snprintf(key_buffer, sizeof(key_buffer), "%s_bd", keys[i]);
-        preferences.putULong(key_buffer, alertSettings[i].beepDuration);
-        snprintf(key_buffer, sizeof(key_buffer), "%s_pd", keys[i]);
-        preferences.putULong(key_buffer, alertSettings[i].pauseDuration);
-        snprintf(key_buffer, sizeof(key_buffer), "%s_f", keys[i]);
-        preferences.putInt(key_buffer, alertSettings[i].flashes);
-        snprintf(key_buffer, sizeof(key_buffer), "%s_fd", keys[i]);
-        preferences.putULong(key_buffer, alertSettings[i].flashOnDuration);
-        snprintf(key_buffer, sizeof(key_buffer), "%s_fo", keys[i]);
-        preferences.putULong(key_buffer, alertSettings[i].flashOffDuration);
-        snprintf(key_buffer, sizeof(key_buffer), "%s_fm", keys[i]);
-        preferences.putUChar(key_buffer, alertSettings[i].flashMask);
-    }
-
-    for(int i=1; i<5; i++) {
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dName", i);
-        preferences.putString(key_buffer, savedLocations[i].name);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dDLH", i);
-        preferences.putBool(key_buffer, savedLocations[i].dropLeftHopper);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dDRH", i);
-        preferences.putBool(key_buffer, savedLocations[i].dropRightHopper);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dRLH", i);
-        preferences.putBool(key_buffer, savedLocations[i].releaseLeftHook);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dRRH", i);
-        preferences.putBool(key_buffer, savedLocations[i].releaseRightHook);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dRTH", i);
-        preferences.putBool(key_buffer, savedLocations[i].autoReturnToHome);
-    }
-
-    preferences.end();
-    portEXIT_CRITICAL(&nvsMutex); // <<< FIX: Release NVS access
-
-    status.persistence.settings_dirty = false;
-  }
-}
-
-void loadAllSettings(){
-    portENTER_CRITICAL(&nvsMutex); // <<< FIX: Protect NVS access
-    preferences.begin("baitboat", true);
-    boatStatus.mode.low_battery_threshold = preferences.getFloat("low_batt", 10.5);
-    boatStatus.autopilot.low_battery_rth_enabled = preferences.getBool("lb_rth_en", false);
-    const char* keys[] = {"hs", "ws", "gf", "ae", "lh", "rh", "lk", "rk", "lb", "wr", "ar"};
-    char key_buffer[25];
-    for(int i = 0; i < NUM_ALERT_TYPES; i++){
-        bool is_lb = (i == AlertType::ALERT_LOW_BATTERY);
-        bool is_wr = (i == AlertType::ALERT_WIFI_RESET);
-        bool is_armed = (i == AlertType::ALERT_ARMED);
-
-        snprintf(key_buffer, sizeof(key_buffer), "%s_b", keys[i]);
-        int beeps = preferences.getInt(key_buffer, is_lb ? 10000 : (is_wr ? 3 : (is_armed ? 2 : (i==AlertType::ALERT_HOME_SAVED?4:1))));
-        snprintf(key_buffer, sizeof(key_buffer), "%s_bd", keys[i]);
-        unsigned long beepDuration = preferences.getULong(key_buffer, is_lb ? 500 : (is_wr ? 250 : (is_armed ? 80 : 150)));
-        snprintf(key_buffer, sizeof(key_buffer), "%s_pd", keys[i]);
-        unsigned long pauseDuration = preferences.getULong(key_buffer, is_lb ? 500 : (is_wr ? 150 : (is_armed ? 80 : 100)));
-        snprintf(key_buffer, sizeof(key_buffer), "%s_f", keys[i]);
-        int flashes = preferences.getInt(key_buffer, is_lb ? 10000 : (is_wr ? 3 : (is_armed ? 2 : (i<4?3:7))));
-        snprintf(key_buffer, sizeof(key_buffer), "%s_fd", keys[i]);
-        unsigned long flashOnDuration = preferences.getULong(key_buffer, is_lb ? 500 : (is_wr ? 250 : (is_armed ? 80 : 150)));
-        snprintf(key_buffer, sizeof(key_buffer), "%s_fo", keys[i]);
-        unsigned long flashOffDuration = preferences.getULong(key_buffer, is_lb ? 500 : (is_wr ? 150 : (is_armed ? 80 : 150)));
-        snprintf(key_buffer, sizeof(key_buffer), "%s_fm", keys[i]);
-        byte flashMask = (byte)preferences.getUChar(key_buffer, ALL_LIGHTS_MASK);
-        alertSettings[i] = {beeps, beepDuration, pauseDuration, flashes, flashOnDuration, flashOffDuration, flashMask};
-    }
-
-    for (int i = 0; i < 5; i++) {
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dSet", i);
-        savedLocations[i].isSet = preferences.getBool(key_buffer, false);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dLat", i);
-        savedLocations[i].lat = preferences.getDouble(key_buffer, 0.0);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dLng", i);
-        savedLocations[i].lng = preferences.getDouble(key_buffer, 0.0);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dName", i);
-        savedLocations[i].name = preferences.getString(key_buffer, (i==0) ? "Home" : "Waypoint " + String(i));
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dDLH", i);
-        savedLocations[i].dropLeftHopper = preferences.getBool(key_buffer, false);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dDRH", i);
-        savedLocations[i].dropRightHopper = preferences.getBool(key_buffer, false);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dRLH", i);
-        savedLocations[i].releaseLeftHook = preferences.getBool(key_buffer, false);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dRRH", i);
-        savedLocations[i].releaseRightHook = preferences.getBool(key_buffer, false);
-        snprintf(key_buffer, sizeof(key_buffer), "loc%dRTH", i);
-        savedLocations[i].autoReturnToHome = preferences.getBool(key_buffer, false);
-    }
-    savedLocations[0].name = "Home";
-
-    preferences.end();
-    portEXIT_CRITICAL(&nvsMutex); // <<< FIX: Release NVS access
 }
 
 void setupIO() {
@@ -659,44 +383,6 @@ void setupLightsAndBuzzer() {
   digitalWrite(SR_RCLK, LOW);
   shiftOut(SR_SER, SR_SRCLK, MSBFIRST, initialByte);
   digitalWrite(SR_RCLK, HIGH);
-}
-
-void handleGPS(BoatStatus& status) {
-  int chars_processed = 0;
-  while (gpsSerial.available() && chars_processed++ < GPS_READ_MAX_CHARS) {
-    gps.encode(gpsSerial.read());
-  }
-
-  bool hasGpsFixNow = gps.location.isValid() && gps.satellites.value() >= MIN_SATELLITES && gps.hdop.hdop() <= MAX_HDOP;
-  if (hasGpsFixNow) {
-    status.nav.last_gps_signal_ms = millis();
-    if (!status.nav.has_gps_fix) {
-      startBuzzerPattern(alertBuzzerPatterns[ALERT_GPS_FIX], alertSettings[ALERT_GPS_FIX]);
-      startFlashPattern(alertLightFlashPatterns[ALERT_GPS_FIX], alertSettings[ALERT_GPS_FIX]);
-      kalman_init(kf, gps.location.lat(), gps.location.lng(), 2.0);
-    } else {
-      kalman_update(kf, gps.location.lat(), gps.location.lng());
-      status.nav.latitude = kf.x[0];
-      status.nav.longitude = kf.x[1];
-      double vel_lat_mps = kf.x[2] * (M_PI / 180.0) * 6371000.0;
-      double vel_lon_mps = kf.x[3] * (M_PI / 180.0) * 6371000.0 * cos(kf.x[0] * M_PI / 180.0);
-      status.nav.speed_mps = sqrt(pow(vel_lat_mps, 2) + pow(vel_lon_mps, 2));
-    }
-  } else {
-    if (millis() - status.nav.last_gps_signal_ms > GPS_VALIDITY_TIMEOUT && status.nav.has_gps_fix) {
-      if(status.mode.current == AUTOPILOT_MODE || status.mode.current == ANCHOR_MODE){
-        status.mode.current = MANUAL_MODE;
-        status.autopilot.engaged = false;
-        voidMotors();
-      }
-    }
-  }
-  status.nav.has_gps_fix = hasGpsFixNow;
-  if (!hasGpsFixNow) {
-      status.nav.latitude = gps.location.lat(); // Still update with potentially stale data if needed elsewhere
-      status.nav.longitude = gps.location.lng();
-      // Speed comes from Kalman filter, which continues predicting
-  }
 }
 
 void handleModes(BoatStatus& status) {
@@ -731,9 +417,9 @@ void handleModes(BoatStatus& status) {
     status.autopilot.target_waypoint_index = -1;
     status.autopilot.arrival_state = AP_IDLE;
     currentRoute.status = ROUTE_INACTIVE;
-
     if (status.mode.current == ANCHOR_MODE && status.nav.has_gps_fix) {
-        status.autopilot.anchor_lat = status.nav.latitude; // Use Kalman filtered position
+        status.autopilot.anchor_lat = status.nav.latitude;
+        // Use Kalman filtered position
         status.autopilot.anchor_lng = status.nav.longitude;
         // Reset PID integrals when entering anchor mode
         throttlePID.integral = 0;
@@ -765,7 +451,8 @@ void handleCompassReturn(BoatStatus& status) {
   }
 
   int steeringAdjust = calculateSteeringPID(status, status.failsafe.compass_return_heading);
-  int baseSpeed = 1650; // Slow forward
+  int baseSpeed = 1650;
+  // Slow forward
 
   int targetSpeedLeft = baseSpeed - steeringAdjust;
   int targetSpeedRight = baseSpeed + steeringAdjust;
@@ -784,7 +471,6 @@ void updateMotors(BoatStatus& status) {
 
   int targetSpeedLeft = RC_MID_POINT;
   int targetSpeedRight = RC_MID_POINT;
-
   if (status.mode.current == MANUAL_MODE) {
     int throttle = status.rc.channels[CH3];
     int steering = status.rc.channels[CH4];
@@ -801,45 +487,48 @@ void updateMotors(BoatStatus& status) {
   else if (status.mode.current == ANCHOR_MODE && (status.nav.has_gps_fix || kf.x[0] != 0.0)) { // Use Kalman position even if GPS fix is momentarily lost
 
       // --- Tuning Parameter ---
-      const float DRIFT_COMPENSATION_FACTOR = 150.0; // Proportional gain for drift. Increase to fight drift harder. Adjust this value!
-
+      const float DRIFT_COMPENSATION_FACTOR = 150.0;
+      // Proportional gain for drift. Increase to fight drift harder. Adjust this value!
       // 1. Get Position Error
       double distance = calculateDistance(status.nav.latitude, status.nav.longitude, status.autopilot.anchor_lat, status.autopilot.anchor_lng);
       double bearingToAnchor = calculateBearing(status.nav.latitude, status.nav.longitude, status.autopilot.anchor_lat, status.autopilot.anchor_lng);
-      double courseErrorToAnchor = calculateCourseError(status, bearingToAnchor); // Error: target_bearing - current_heading
+      double courseErrorToAnchor = calculateCourseError(status, bearingToAnchor);
+      // Error: target_bearing - current_heading
 
       // 2. Estimate Drift Velocity (using Kalman filter state)
       // Convert Kalman velocity (degrees/sec) to m/s
       double lat_rad = status.nav.latitude * M_PI / 180.0;
       double vel_lat_mps = kf.x[2] * (M_PI / 180.0) * 6371000.0;
       double vel_lon_mps = kf.x[3] * (M_PI / 180.0) * 6371000.0 * cos(lat_rad);
-
       // Rotate velocity into boat's frame (forward/sideways) - optional but useful for understanding
       // float heading_rad = status.nav.heading * PI / 180.0;
       // float cos_h = cos(heading_rad);
       // float sin_h = sin(heading_rad);
-      // float vel_forward = vel_lat_mps * cos_h + vel_lon_mps * sin_h; // Velocity along boat's direction
+      // float vel_forward = vel_lat_mps * cos_h + vel_lon_mps * sin_h;
+      // Velocity along boat's direction
       // float vel_sideways = -vel_lat_mps * sin_h + vel_lon_mps * cos_h;// Velocity perpendicular to boat's direction
 
       // Calculate total drift speed and direction *against* the drift
       double drift_speed_mps = sqrt(pow(vel_lat_mps, 2) + pow(vel_lon_mps, 2));
       double drift_direction_rad = atan2(vel_lon_mps, vel_lat_mps); // Direction the drift IS going (0=North, PI/2=East)
-      double counter_drift_heading_rad = drift_direction_rad + M_PI; // Direction to point INTO the drift
+      double counter_drift_heading_rad = drift_direction_rad + M_PI;
+      // Direction to point INTO the drift
       double counter_drift_heading_deg = fmod(counter_drift_heading_rad * 180.0 / M_PI + 360.0, 360.0);
-
       // 3. Calculate Control Outputs
 
       // --- Steering ---
       // Decide target heading: point towards anchor or into drift?
       // Simple approach: Prioritize fighting drift if significant, otherwise point to anchor.
       double target_heading_deg;
-      const float MIN_DRIFT_SPEED_FOR_HEADING = 0.1; // m/s - threshold to prioritize drift heading
+      const float MIN_DRIFT_SPEED_FOR_HEADING = 0.1;
+      // m/s - threshold to prioritize drift heading
       if (drift_speed_mps > MIN_DRIFT_SPEED_FOR_HEADING) {
           target_heading_deg = counter_drift_heading_deg;
       } else {
           target_heading_deg = bearingToAnchor;
       }
-      int steeringAdjust = calculateSteeringPID(status, target_heading_deg); // Steer towards the chosen target heading
+      int steeringAdjust = calculateSteeringPID(status, target_heading_deg);
+      // Steer towards the chosen target heading
 
       // --- Throttle ---
       // Combine position correction and drift correction
@@ -885,7 +574,6 @@ void updateMotors(BoatStatus& status) {
     double targetLat = savedLocations[status.autopilot.target_waypoint_index].lat;
     double targetLng = savedLocations[status.autopilot.target_waypoint_index].lng;
     double distance = calculateDistance(status.nav.latitude, status.nav.longitude, targetLat, targetLng);
-
     // Dynamic braking check
     float dynamic_braking_dist = max(MIN_BRAKING_DISTANCE, status.nav.speed_mps * BRAKING_FACTOR);
     if (distance < dynamic_braking_dist) {
@@ -895,11 +583,13 @@ void updateMotors(BoatStatus& status) {
       // Write braking pulse immediately
       escLeft.writeMicroseconds(BRAKING_REVERSE_PULSE);
       escRight.writeMicroseconds(BRAKING_REVERSE_PULSE);
-      return; // Exit motor update for this cycle
+      return;
+      // Exit motor update for this cycle
     }
 
     // If not braking, continue with normal navigation steering/throttle
-    status.autopilot.arrival_state = AP_IDLE; // Ensure state is idle if not braking
+    status.autopilot.arrival_state = AP_IDLE;
+    // Ensure state is idle if not braking
 
     double courseError = abs(calculateCourseError(status, targetLat, targetLng));
     int steeringAdjust = calculateSteeringPID(status, targetLat, targetLng);
@@ -909,11 +599,13 @@ void updateMotors(BoatStatus& status) {
         targetSpeedLeft = RC_MID_POINT + steeringAdjust;
         targetSpeedRight = RC_MID_POINT - steeringAdjust;
     } else { // Aggressive differential steering otherwise
-        int baseSpeed = 2000; // Max forward throttle for autopilot
+        int baseSpeed = 2000;
+        // Max forward throttle for autopilot
         if (courseError > 20.0) { // Slow down slightly for sharper turns
             baseSpeed = map(courseError, 20, 45, 2000, 1750);
         }
-        int steeringEffect = steeringAdjust * 2; // Multiply effect for strong turning
+        int steeringEffect = steeringAdjust * 2;
+        // Multiply effect for strong turning
         targetSpeedLeft = baseSpeed + steeringEffect;
         targetSpeedRight = baseSpeed - steeringEffect;
     }
@@ -944,7 +636,8 @@ void handleManualActuators(BoatStatus& status) {
   }
 
   if (millis() - status.rc.last_update_ms > IBUS_TIMEOUT) {
-      return; // No RC signal
+      return;
+      // No RC signal
   }
 
     unsigned long now = millis();
@@ -978,10 +671,12 @@ void handleManualActuators(BoatStatus& status) {
     }
     // Auxiliary (CH6 Switch) - Assuming momentary action isn't needed, just on/off
     if (status.rc.channels[CH6] > RC_MID_POINT && !actuators[4].active) {
-        startActuator(actuators[4]); // Activate if switched on
+        startActuator(actuators[4]);
+        // Activate if switched on
     }
     else if (status.rc.channels[CH6] <= RC_MID_POINT && actuators[4].active) {
-        actuators[4].active = false; // Deactivate if switched off
+        actuators[4].active = false;
+        // Deactivate if switched off
         digitalWrite(actuators[4].pin, actuators[4].inverted ? HIGH : LOW);
     }
 }
@@ -1023,19 +718,21 @@ void handleSystemChecks(BoatStatus& status) {
         // Trigger alert/RTH only after debounce period
         if (isLowBattery && !low_batt_alert_active && (now - lowBatteryStartTime > LOW_BATT_DEBOUNCE_MS)) {
             if (status.autopilot.low_battery_rth_enabled && savedLocations[0].isSet && !status.autopilot.rth_active) {
-                resetForNewTarget(status, 0, true); // Initiate RTH
+                resetForNewTarget(status, 0, true);
+                // Initiate RTH
             } else {
                 // Start continuous alert if RTH not enabled/possible
                 startBuzzerPattern(alertBuzzerPatterns[ALERT_LOW_BATTERY], alertSettings[ALERT_LOW_BATTERY]);
                 startFlashPattern(alertLightFlashPatterns[ALERT_LOW_BATTERY], alertSettings[ALERT_LOW_BATTERY]);
             }
-            low_batt_alert_active = true; // Mark alert as active
+            low_batt_alert_active = true;
+            // Mark alert as active
         }
     }
 
     // Update desired base light state based on CH5 switch
     desiredBaseLightState = (status.rc.channels[CH5] < LIGHT_SWITCH_THRESHOLD || status.mode.current == LOCATION_SAVE_MODE) ?
-                            ALL_LIGHTS_MASK : 0x00; // Lights on if switch down OR in save mode
+        ALL_LIGHTS_MASK : 0x00; // Lights on if switch down OR in save mode
 }
 
 void updateSingleBuzzerPattern(BuzzerPatternControl& pattern) {
@@ -1092,15 +789,18 @@ void updateLights() {
   manageAllBuzzerAlerts();
   manageAllLightFlashAlerts();
 
-  byte logicalOnState = desiredBaseLightState; // Start with the base state from the switch
+  byte logicalOnState = desiredBaseLightState;
+  // Start with the base state from the switch
 
   // Override with flashing patterns
   for (int i = 0; i < NUM_ALERT_TYPES; i++) {
     if (alertLightFlashPatterns[i].active) {
       if (alertLightFlashPatterns[i].currentlyOn) {
-        logicalOnState |= alertLightFlashPatterns[i].flashMask; // Turn ON lights in the mask
+        logicalOnState |= alertLightFlashPatterns[i].flashMask;
+        // Turn ON lights in the mask
       } else {
-        logicalOnState &= ~alertLightFlashPatterns[i].flashMask; // Turn OFF lights in the mask
+        logicalOnState &= ~alertLightFlashPatterns[i].flashMask;
+        // Turn OFF lights in the mask
       }
     }
   }
@@ -1116,11 +816,14 @@ void updateLights() {
 
   // Combine light state and buzzer state for shift register
   // Note: Shift register logic seems inverted (0 = ON, 1 = OFF for lights)
-  byte bitsToSend = ~logicalOnState; // Invert for lights
+  byte bitsToSend = ~logicalOnState;
+  // Invert for lights
   if (isBuzzerOn) {
-    bitsToSend |= BUZZER_MASK; // Buzzer ON (assuming 1 = ON for buzzer bit)
+    bitsToSend |= BUZZER_MASK;
+    // Buzzer ON (assuming 1 = ON for buzzer bit)
   } else {
-    bitsToSend &= ~BUZZER_MASK; // Buzzer OFF
+    bitsToSend &= ~BUZZER_MASK;
+    // Buzzer OFF
   }
 
   // Send to shift register only if state changed
@@ -1144,7 +847,8 @@ float readBatteryVoltage() {
 void startActuator(Actuator &actuator) {
   actuator.active = true;
   actuator.activatedAt = millis();
-  digitalWrite(actuator.pin, actuator.inverted ? LOW : HIGH); // Set pin HIGH or LOW based on inversion
+  digitalWrite(actuator.pin, actuator.inverted ? LOW : HIGH);
+  // Set pin HIGH or LOW based on inversion
 }
 
 void startBuzzerPattern(BuzzerPatternControl& pattern, const AlertSetting& settings) {
