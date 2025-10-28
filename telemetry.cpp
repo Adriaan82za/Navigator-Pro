@@ -9,6 +9,7 @@
 
 #include "telemetry.h"
 #include "autopilot.h"
+#include <WebServer.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
 

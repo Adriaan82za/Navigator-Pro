@@ -1,7 +1,9 @@
 #ifndef TELEMETRY_H
 #define TELEMETRY_H
 
-#include <WebServer.h>
+// Forward declaration for WebServer to avoid including the full header
+class WebServer;
+
 #include <ArduinoJson.h>
 #include <TinyGPSPlus.h> // MOVED HERE
 #include <Preferences.h>
