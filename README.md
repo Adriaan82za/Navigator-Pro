@@ -1,1 +1,1 @@
-# Navigaotr-Pro
+# Navigator-Pro
