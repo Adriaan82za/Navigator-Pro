@@ -6,6 +6,7 @@
  * Version: 12.1.5 (Modularized)
  */
 
+#include <Arduino.h>
 #include "imu.h"
 #include "kalman.h"
 #include <Wire.h>

@@ -6,6 +6,7 @@
  * Version: 12.1.5 (Modularized)
  */
 
+#include <Arduino.h>
 #include "webserver.h"
 #include "telemetry.h"
 
