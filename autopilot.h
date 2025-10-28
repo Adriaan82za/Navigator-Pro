@@ -9,6 +9,8 @@
 // ====== External Global Object/Variable Declarations ======
 extern TinyGPSPlus gps;
 extern Preferences preferences;
+extern portMUX_TYPE boatStatusMutex;
+extern portMUX_TYPE nvsMutex;
 extern SavedLocation savedLocations[5];
 extern PIDController steeringPID;
 extern PIDController throttlePID; // NEW

@@ -504,13 +504,60 @@ void setupWebServerRoutes() {
 
 void handleRestoreUpload() {
   HTTPUpload& upload = server.upload();
+  static File tempFile;
+  const char* tempFilePath = "/tmp_restore.json";
+  
   if (upload.status == UPLOAD_FILE_START) {
     restoreUploadStatus = RESTORE_IDLE;
-  } else if (upload.status == UPLOAD_FILE_END) {
-    StaticJsonDocument<4096> doc;
-    DeserializationError error = deserializeJson(doc, upload.buf, upload.currentSize);
-
+    // Open temporary file for writing
+    if (SPIFFS.exists(tempFilePath)) {
+      SPIFFS.remove(tempFilePath);
+    }
+    tempFile = SPIFFS.open(tempFilePath, "w");
+    if (!tempFile) {
+      restoreUploadStatus = RESTORE_FAILED;
+    }
+  } 
+  else if (upload.status == UPLOAD_FILE_WRITE) {
+    // Stream upload chunks to temporary file
+    if (tempFile && upload.currentSize > 0) {
+      size_t written = tempFile.write(upload.buf, upload.currentSize);
+      if (written != upload.currentSize) {
+        tempFile.close();
+        SPIFFS.remove(tempFilePath);
+        restoreUploadStatus = RESTORE_FAILED;
+      }
+    }
+  } 
+  else if (upload.status == UPLOAD_FILE_END) {
+    // Close the temp file
+    if (tempFile) {
+      tempFile.close();
+    }
+    
+    // Open and parse the complete file
+    tempFile = SPIFFS.open(tempFilePath, "r");
+    if (!tempFile) {
+      restoreUploadStatus = RESTORE_FAILED;
+      SPIFFS.remove(tempFilePath);
+      return;
+    }
+    
+    size_t fileSize = tempFile.size();
+    if (fileSize == 0 || fileSize > 10240) { // Max 10KB safety check
+      tempFile.close();
+      SPIFFS.remove(tempFilePath);
+      restoreUploadStatus = RESTORE_FAILED;
+      return;
+    }
+    
+    // Use DynamicJsonDocument sized to file content
+    DynamicJsonDocument doc(fileSize + 512); // Add margin for parsing overhead
+    DeserializationError error = deserializeJson(doc, tempFile);
+    tempFile.close();
+    
     if (error) {
+      SPIFFS.remove(tempFilePath);
       restoreUploadStatus = RESTORE_FAILED;
       return;
     }
@@ -518,11 +565,12 @@ void handleRestoreUpload() {
     // Validate the restored settings before applying them
     if (!doc.containsKey("pid_p") || !doc.containsKey("pid_i") || !doc.containsKey("pid_d") ||
         !doc.containsKey("low_batt") || !doc.containsKey("lb_rth_en") || !doc.containsKey("alerts") || !doc.containsKey("locations")) {
+      SPIFFS.remove(tempFilePath);
       restoreUploadStatus = RESTORE_FAILED;
       return;
     }
 
-    // <<< FIX: Protect NVS access
+    // Write to Preferences under nvsMutex protection
     portENTER_CRITICAL(&nvsMutex);
     preferences.begin("baitboat", false);
     
@@ -575,6 +623,16 @@ void handleRestoreUpload() {
     preferences.end();
     portEXIT_CRITICAL(&nvsMutex);
     
+    // Clean up temp file
+    SPIFFS.remove(tempFilePath);
     restoreUploadStatus = RESTORE_SUCCESS;
+  }
+  else if (upload.status == UPLOAD_FILE_ABORTED) {
+    // Clean up on abort
+    if (tempFile) {
+      tempFile.close();
+    }
+    SPIFFS.remove(tempFilePath);
+    restoreUploadStatus = RESTORE_FAILED;
   }
 }

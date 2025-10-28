@@ -420,7 +420,8 @@ void handleIMU(BoatStatus& status) {
   static unsigned long lastPredictTime = 0;
   if (bno08x.getSensorEvent(&sensorValue)) {
     if (sensorValue.sensorId == SH2_ROTATION_VECTOR) {
-      status.nav.imu_accuracy = sensorValue.status & 0b00000011;
+      // Compute IMU-derived values locally first
+      uint8_t imu_accuracy = sensorValue.status & 0b00000011;
       float q_i = sensorValue.un.rotationVector.i;
       float q_j = sensorValue.un.rotationVector.j;
       float q_k = sensorValue.un.rotationVector.k;
@@ -429,17 +430,16 @@ void handleIMU(BoatStatus& status) {
                             q_real * q_real + q_i * q_i - q_j * q_j - q_k * q_k);
       float yaw_deg = yaw_rad * (180.0 / PI);
 
-      // --- FIXED: Removed yaw_deg = 90.0 - yaw_deg; to correct 90° offset ---
-      // If mounting requires rotation, add a prefs-based offset instead, e.g.:
-      // yaw_deg += preferences.getFloat("heading_offset", 0.0);
-
-      float final_heading = yaw_deg + status.nav.magnetic_declination;
+      // Get magnetic declination for heading calculation
+      float mag_decl = status.nav.magnetic_declination;
+      
+      float final_heading = yaw_deg + mag_decl;
       if(final_heading >= 360.0) final_heading -= 360.0;
       if(final_heading < 0.0) final_heading += 360.0;
-      status.nav.heading = final_heading;
+      
       float sinr_cosp = 2 * (q_real * q_i + q_j * q_k);
       float cosr_cosp = 1 - 2 * (q_i * q_i + q_j * q_j);
-      status.nav.roll = atan2(sinr_cosp, cosr_cosp) * (180.0 / PI);
+      float roll = atan2(sinr_cosp, cosr_cosp) * (180.0 / PI);
 
       float sinp = 2 * (q_real * q_j - q_k * q_i);
       float pitch_val;
@@ -447,32 +447,48 @@ void handleIMU(BoatStatus& status) {
         pitch_val = copysign(M_PI / 2, sinp) * (180.0 / PI);
       else
         pitch_val = asin(sinp) * (180.0 / PI);
-      // --- User's Transformation for Pitch ---
-      status.nav.pitch = pitch_val * -1.0;
-      // --- End Transformation ---
+      float pitch = pitch_val * -1.0;
+
+      // Update nav fields under mutex
+      portENTER_CRITICAL(&boatStatusMutex);
+      status.nav.imu_accuracy = imu_accuracy;
+      status.nav.heading = final_heading;
+      status.nav.roll = roll;
+      status.nav.pitch = pitch;
+      portEXIT_CRITICAL(&boatStatusMutex);
 
     } else if (sensorValue.sensorId == SH2_LINEAR_ACCELERATION) {
-        // <<< FIX: Removed 'status.nav.has_gps_fix' check.
-        // Prediction should run even without GPS (dead reckoning).
         if (lastPredictTime > 0) {
             float dt = (micros() - lastPredictTime) / 1000000.0f;
             float acc_x = sensorValue.un.linearAcceleration.x;
             float acc_y = sensorValue.un.linearAcceleration.y;
 
-            // Use the final calculated heading (which includes user transformations)
-            // to rotate accelerations for the Kalman filter.
-            float heading_rad = status.nav.heading * PI / 180.0;
+            // Read heading under mutex
+            portENTER_CRITICAL(&boatStatusMutex);
+            float heading = status.nav.heading;
+            portEXIT_CRITICAL(&boatStatusMutex);
+
+            // Run kalman_predict outside mutex
+            float heading_rad = heading * PI / 180.0;
             float cos_h = cos(heading_rad);
             float sin_h = sin(heading_rad);
             float acc_n = acc_x * cos_h - acc_y * sin_h;
             float acc_e = acc_x * sin_h + acc_y * cos_h;
             kalman_predict(kf, dt, acc_n, acc_e);
 
-            status.nav.latitude = kf.x[0];
-            status.nav.longitude = kf.x[1];
+            // Copy predicted values locally
+            double pred_lat = kf.x[0];
+            double pred_lon = kf.x[1];
             double vel_lat_mps = kf.x[2] * (M_PI / 180.0) * 6371000.0;
             double vel_lon_mps = kf.x[3] * (M_PI / 180.0) * 6371000.0 * cos(kf.x[0] * M_PI / 180.0);
-            status.nav.speed_mps = sqrt(pow(vel_lat_mps, 2) + pow(vel_lon_mps, 2));
+            float pred_speed = sqrt(pow(vel_lat_mps, 2) + pow(vel_lon_mps, 2));
+
+            // Update nav fields under mutex
+            portENTER_CRITICAL(&boatStatusMutex);
+            status.nav.latitude = pred_lat;
+            status.nav.longitude = pred_lon;
+            status.nav.speed_mps = pred_speed;
+            portEXIT_CRITICAL(&boatStatusMutex);
         }
         lastPredictTime = micros();
     }
@@ -668,34 +684,81 @@ void handleGPS(BoatStatus& status) {
   }
 
   bool hasGpsFixNow = gps.location.isValid() && gps.satellites.value() >= MIN_SATELLITES && gps.hdop.hdop() <= MAX_HDOP;
+  
+  // Compute local values first
+  double current_lat = 0.0, current_lon = 0.0;
+  float current_speed = 0.0;
+  bool trigger_alert = false;
+  bool trigger_mode_change = false;
+  
   if (hasGpsFixNow) {
-    status.nav.last_gps_signal_ms = millis();
-    if (!status.nav.has_gps_fix) {
-      startBuzzerPattern(alertBuzzerPatterns[ALERT_GPS_FIX], alertSettings[ALERT_GPS_FIX]);
-      startFlashPattern(alertLightFlashPatterns[ALERT_GPS_FIX], alertSettings[ALERT_GPS_FIX]);
+    unsigned long now = millis();
+    bool had_gps_fix = false;
+    
+    portENTER_CRITICAL(&boatStatusMutex);
+    had_gps_fix = status.nav.has_gps_fix;
+    status.nav.last_gps_signal_ms = now;
+    portEXIT_CRITICAL(&boatStatusMutex);
+    
+    if (!had_gps_fix) {
+      // First fix initialization
+      trigger_alert = true;
       kalman_init(kf, gps.location.lat(), gps.location.lng(), 2.0);
+      current_lat = kf.x[0];
+      current_lon = kf.x[1];
+      current_speed = 0.0;
     } else {
+      // Subsequent updates
       kalman_update(kf, gps.location.lat(), gps.location.lng());
-      status.nav.latitude = kf.x[0];
-      status.nav.longitude = kf.x[1];
+      current_lat = kf.x[0];
+      current_lon = kf.x[1];
       double vel_lat_mps = kf.x[2] * (M_PI / 180.0) * 6371000.0;
       double vel_lon_mps = kf.x[3] * (M_PI / 180.0) * 6371000.0 * cos(kf.x[0] * M_PI / 180.0);
-      status.nav.speed_mps = sqrt(pow(vel_lat_mps, 2) + pow(vel_lon_mps, 2));
+      current_speed = sqrt(pow(vel_lat_mps, 2) + pow(vel_lon_mps, 2));
     }
   } else {
-    if (millis() - status.nav.last_gps_signal_ms > GPS_VALIDITY_TIMEOUT && status.nav.has_gps_fix) {
-      if(status.mode.current == AUTOPILOT_MODE || status.mode.current == ANCHOR_MODE){
-        status.mode.current = MANUAL_MODE;
-        status.autopilot.engaged = false;
-        voidMotors();
+    unsigned long now = millis();
+    unsigned long last_signal;
+    bool had_gps_fix = false;
+    BoatMode current_mode;
+    
+    portENTER_CRITICAL(&boatStatusMutex);
+    last_signal = status.nav.last_gps_signal_ms;
+    had_gps_fix = status.nav.has_gps_fix;
+    current_mode = status.mode.current;
+    portEXIT_CRITICAL(&boatStatusMutex);
+    
+    if (now - last_signal > GPS_VALIDITY_TIMEOUT && had_gps_fix) {
+      if(current_mode == AUTOPILOT_MODE || current_mode == ANCHOR_MODE){
+        trigger_mode_change = true;
       }
     }
+    // Still update with potentially stale data
+    current_lat = gps.location.lat();
+    current_lon = gps.location.lng();
   }
+  
+  // Update status under mutex
+  portENTER_CRITICAL(&boatStatusMutex);
   status.nav.has_gps_fix = hasGpsFixNow;
-  if (!hasGpsFixNow) {
-      status.nav.latitude = gps.location.lat(); // Still update with potentially stale data if needed elsewhere
-      status.nav.longitude = gps.location.lng();
-      // Speed comes from Kalman filter, which continues predicting
+  status.nav.latitude = current_lat;
+  status.nav.longitude = current_lon;
+  if (hasGpsFixNow) {
+    status.nav.speed_mps = current_speed;
+  }
+  if (trigger_mode_change) {
+    status.mode.current = MANUAL_MODE;
+    status.autopilot.engaged = false;
+  }
+  portEXIT_CRITICAL(&boatStatusMutex);
+  
+  // Trigger alerts and motors outside mutex
+  if (trigger_alert) {
+    startBuzzerPattern(alertBuzzerPatterns[ALERT_GPS_FIX], alertSettings[ALERT_GPS_FIX]);
+    startFlashPattern(alertLightFlashPatterns[ALERT_GPS_FIX], alertSettings[ALERT_GPS_FIX]);
+  }
+  if (trigger_mode_change) {
+    voidMotors();
   }
 }
 

@@ -65,6 +65,7 @@ void resetForNewTarget(BoatStatus& status, int targetWpIndex, bool isRth) {
 // Autopilot Initialization
 // ==============================
 void initAutopilot() {
+  portENTER_CRITICAL(&nvsMutex);
   preferences.begin("baitboat", true);
   
   steeringPID.Kp = preferences.getFloat("pid_p", 4.0);
@@ -76,14 +77,16 @@ void initAutopilot() {
   throttlePID.Kd = preferences.getFloat("tpid_d", 5.0);
   
   preferences.end();
+  portEXIT_CRITICAL(&nvsMutex);
 
-  if (isnan(steeringPID.Kp) || steeringPID.Kp <= 0) steeringPID.Kp = 4.0;
-  if (isnan(steeringPID.Ki) || steeringPID.Ki <= 0) steeringPID.Ki = 0.1;
-  if (isnan(steeringPID.Kd) || steeringPID.Kd <= 0) steeringPID.Kd = 0.5;
+  // Allow Ki/Kd to be zero, only correct NaN
+  if (isnan(steeringPID.Kp) || steeringPID.Kp < 0) steeringPID.Kp = 4.0;
+  if (isnan(steeringPID.Ki) || steeringPID.Ki < 0) steeringPID.Ki = 0.1;
+  if (isnan(steeringPID.Kd) || steeringPID.Kd < 0) steeringPID.Kd = 0.5;
 
-  if (isnan(throttlePID.Kp) || throttlePID.Kp <= 0) throttlePID.Kp = 20.0;
-  if (isnan(throttlePID.Ki) || throttlePID.Ki <= 0) throttlePID.Ki = 2.0;
-  if (isnan(throttlePID.Kd) || throttlePID.Kd <= 0) throttlePID.Kd = 5.0;
+  if (isnan(throttlePID.Kp) || throttlePID.Kp < 0) throttlePID.Kp = 20.0;
+  if (isnan(throttlePID.Ki) || throttlePID.Ki < 0) throttlePID.Ki = 2.0;
+  if (isnan(throttlePID.Kd) || throttlePID.Kd < 0) throttlePID.Kd = 5.0;
 
   steeringPID.integral = 0;
   steeringPID.previous_error = 0;
@@ -330,25 +333,43 @@ void handleWaypointArrivalActions(BoatStatus& status) {
 // Save Current Location
 // ==============================
 void saveCurrentLocation(const BoatStatus& status, int slotIndex, bool isHomeSave) {
-  if (slotIndex < 0 || slotIndex >= 5 || !status.nav.has_gps_fix) {
+  if (slotIndex < 0 || slotIndex >= 5) {
     return;
   }
   
-  preferences.begin("baitboat", false);
-  savedLocations[slotIndex].lat = status.nav.latitude;
-  savedLocations[slotIndex].lng = status.nav.longitude;
-  savedLocations[slotIndex].isSet = true;
+  // Read lat/lon locally from status.nav under mutex
+  portENTER_CRITICAL(&boatStatusMutex);
+  bool has_fix = status.nav.has_gps_fix;
+  double lat = status.nav.latitude;
+  double lng = status.nav.longitude;
+  portEXIT_CRITICAL(&boatStatusMutex);
   
-  preferences.putDouble(("loc" + String(slotIndex) + "Lat").c_str(), savedLocations[slotIndex].lat);
-  preferences.putDouble(("loc" + String(slotIndex) + "Lng").c_str(), savedLocations[slotIndex].lng);
+  if (!has_fix) {
+    return;
+  }
+  
+  // Write to Preferences under nvsMutex
+  portENTER_CRITICAL(&nvsMutex);
+  preferences.begin("baitboat", false);
+  preferences.putDouble(("loc" + String(slotIndex) + "Lat").c_str(), lat);
+  preferences.putDouble(("loc" + String(slotIndex) + "Lng").c_str(), lng);
   preferences.putBool(("loc" + String(slotIndex) + "Set").c_str(), true);
-
+  preferences.end();
+  portEXIT_CRITICAL(&nvsMutex);
+  
+  // Update savedLocations[] in-memory under boatStatusMutex
+  portENTER_CRITICAL(&boatStatusMutex);
+  savedLocations[slotIndex].lat = lat;
+  savedLocations[slotIndex].lng = lng;
+  savedLocations[slotIndex].isSet = true;
   savedLocations[slotIndex].dropLeftHopper = false;
   savedLocations[slotIndex].dropRightHopper = false;
   savedLocations[slotIndex].releaseLeftHook = false;
   savedLocations[slotIndex].releaseRightHook = false;
   savedLocations[slotIndex].autoReturnToHome = false;
+  portEXIT_CRITICAL(&boatStatusMutex);
   
+  // Trigger buzzer/flash alerts outside mutex
   if (isHomeSave) {
     startBuzzerPattern(alertBuzzerPatterns[ALERT_HOME_SAVED], alertSettings[ALERT_HOME_SAVED]);
     startFlashPattern(alertLightFlashPatterns[ALERT_HOME_SAVED], alertSettings[ALERT_HOME_SAVED]);
@@ -356,7 +377,6 @@ void saveCurrentLocation(const BoatStatus& status, int slotIndex, bool isHomeSav
     startBuzzerPattern(alertBuzzerPatterns[ALERT_WP_SAVED], alertSettings[ALERT_WP_SAVED]);
     startFlashPattern(alertLightFlashPatterns[ALERT_WP_SAVED], alertSettings[ALERT_WP_SAVED]);
   }
-  preferences.end();
 }
 
 // ==============================
