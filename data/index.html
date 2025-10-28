@@ -1,0 +1,175 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+  <title>Navigator Pro Control</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="main-container">
+    <header>
+      <div class="header-title">
+        <img src="/logo.png" alt="Logo" class="logo">
+        <h1>Navigator Pro</h1>
+      </div>
+    </header>
+    <nav class="tabs">
+      <button class="tab-link active" onclick="showTab('dashboard')">Dashboard</button>
+      <button class="tab-link" onclick="showTab('locations')">Locations</button>
+      <button class="tab-link" onclick="showTab('setup')">Setup</button>
+    </nav>
+
+    <div id="dashboard" class="tab-content active">
+      <div class="grid-container">
+        <div class="card">
+          <h2>Boat Status</h2>
+          <div class="data-item"><span class="label">Armed Status:</span><span class="value" id="armed_status">-</span></div>
+          <div class="data-item"><span class="label">Mode:</span><span class="value" id="mode">-</span></div>
+          <div class="data-item"><span class="label">Autopilot:</span><span class="value" id="autopilot">-</span></div>
+          <div class="data-item"><span class="label">RTH Active:</span><span class="value" id="rth">-</span></div>
+          <div class="data-item"><span class="label">Target Waypoint:</span><span class="value" id="waypoint">-</span></div>
+        </div>
+        <div class="card">
+          <h2>Navigation</h2>
+            <div class="instrument-cluster">
+                <div class="instrument-container">
+                  <div class="compass">
+                      <div class="compass-rose"></div>
+                      <div class="compass-needle"></div>
+                  </div>
+                  <div class="instrument-reading" id="heading_display">--</div>
+                </div>
+                <div class="instrument-container">
+                  <div class="attitude-indicator">
+                      <div class="roll-indicator" id="roll_indicator">
+                          <div class="horizon" id="horizon"></div>
+                      </div>
+                      <div class="attitude-roll-scale"></div>
+                      <div class="attitude-symbol"></div>
+                  </div>
+                  <div class="instrument-reading" id="attitude_display">--</div>
+                </div>
+            </div>
+            <div class="data-item"><span class="label">GPS Fix:</span><span class="value" id="gps_fix">-</span></div>
+            <div class="data-item"><span class="label">Satellites:</span><span class="value" id="satellites">-</span></div>
+            <div class="data-item"><span class="label">Speed:</span><span class="value" id="speed">- m/s</span></div>
+            <div class="data-item"><span class="label">Distance from Home:</span><span class="value" id="distance">- m</span></div>
+        </div>
+        <div class="card">
+          <h2>System & Vitals</h2>
+          <div class="data-item"><span class="label">Battery Voltage:</span><span class="value" id="battery">- V</span></div>
+          <div class="data-item"><span class="label">Latitude:</span><span class="value" id="latitude">-</span></div>
+          <div class="data-item"><span class="label">Longitude:</span><span class="value" id="longitude">-</span></div>
+          <div class="data-item"><span class="label">IMU Confidence:</span><span class="value" id="imu_confidence">-</span></div>
+          <div class="data-item"><span class="label">Auto Declination:</span><span class="value" id="declination">- &deg;</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="locations" class="tab-content">
+      <div id="locations_container"></div>
+
+      <div class="card">
+          <h2>Route Planner</h2>
+          <strong>Current Route:</strong> <span id="route_display">-</span><br>
+          <strong>Status:</strong> <span id="route_status">INACTIVE</span>
+          <div class="form-group" style="margin-top: 15px;">
+              <label for="waypoint_select">Add Waypoint to Route</label>
+              <select id="waypoint_select" class="form-group input"></select>
+              <button class="btn btn-primary" onclick="addWaypointToRoute()">Add</button>
+          </div>
+          <div class="button-group">
+              <button class="btn btn-primary" onclick="controlRoute('start')">Start</button>
+              <button class="btn btn-secondary" onclick="controlRoute('pause')">Pause</button>
+              <button class="btn btn-secondary" onclick="controlRoute('resume')">Resume</button>
+              <button class="btn btn-secondary" onclick="controlRoute('stop')">Stop</button>
+              <button class="btn btn-danger" onclick="clearRoute()">Clear</button>
+          </div>
+      </div>
+    </div>
+
+    <div id="setup" class="tab-content">
+      <div class="card">
+        <h2>Display Settings</h2>
+        <div class="theme-switch">
+          <span class="theme-switch-label" id="themeLabel">Dark Mode</span>
+          <input type="checkbox" id="themeSwitch" class="theme-switch-checkbox">
+          <label for="themeSwitch" class="theme-switch-toggle"></label>
+        </div>
+      </div>
+      <div class="card">
+        <h2>PID Tuning</h2>
+        <div class="grid-container">
+          <div class="form-group"><label for="pid_p">Kp (Proportional)</label><input type="number" step="0.1" id="pid_p"></div>
+          <div class="form-group"><label for="pid_i">Ki (Integral)</label><input type="number" step="0.01" id="pid_i"></div>
+          <div class="form-group"><label for="pid_d">Kd (Derivative)</label><input type="number" step="0.05" id="pid_d"></div>
+        </div>
+        <button class="btn btn-primary" onclick="savePIDGains()">Save PID Gains</button>
+        <p style="color: var(--text-light); font-size: 0.9rem; margin-top: 10px;">Note: Kp is controlled by RC Channel 9 (if available) when in MANUAL or LOCATION SAVE mode.</p>
+      </div>
+      <div class="card">
+        <h2>System Settings</h2>
+        <div class="form-group"><label for="low_batt_v">Low Battery Alert (V)</label><input type="number" step="0.1" id="low_batt_v"></div>
+        <div class="form-group checkbox-container">
+            <input type="checkbox" id="low_batt_rth_enable">
+            <label for="low_batt_rth_enable"><strong>Enable Low Battery Return-to-Home</strong></label>
+        </div>
+        <button class="btn btn-primary" onclick="saveSystemSettings()">Save System Settings</button>
+      </div>
+      <div class="card">
+        <h2>Alerts & Indicators</h2>
+        <div class="form-group">
+            <label for="alert_select">Select Alert to Edit</label>
+            <select id="alert_select" class="form-group input" onchange="populateAlertFields()"></select>
+        </div>
+        <div id="alert_editor">
+            <div class="alert-grid">
+                <div class="form-group"><label>Beeps</label><input type="number" id="alert_b"></div>
+                <div class="form-group"><label>Beep (ms)</label><input type="number" id="alert_bd"></div>
+                <div class="form-group"><label>Pause (ms)</label><input type="number" id="alert_pd"></div>
+                <div class="form-group"><label>Flashes</label><input type="number" id="alert_f"></div>
+                <div class="form-group"><label>Flash On (ms)</label><input type="number" id="alert_fd"></div>
+                <div class="form-group"><label>Flash Off (ms)</label><input type="number" id="alert_fo"></div>
+            </div>
+            <div class="light-selection"><strong>Lights to Flash:</strong><br>
+                <label><input type="checkbox" value="32" class="alert_lm"> Headlights</label>
+                <label><input type="checkbox" value="16" class="alert_lm"> Front Left</label>
+                <label><input type="checkbox" value="64" class="alert_lm"> Front Right</label>
+                <label><input type="checkbox" value="8"  class="alert_lm"> Rear Left</label>
+                <label><input type="checkbox" value="128" class="alert_lm"> Rear Right</label>
+            </div>
+        </div>
+        <button class="btn btn-primary" style="margin-top: 20px;" onclick="saveAlertSettings()">Save Current Alert</button>
+      </div>
+      <div class="card">
+        <h2>Wi-Fi Settings</h2>
+        <div class="form-group"><label for="wifi_ssid">Network Name (SSID)</label><input type="text" id="wifi_ssid"></div>
+        <div class="form-group"><label for="wifi_pass">Password (min 8 chars)</label><input type="text" id="wifi_pass" placeholder="Leave blank to keep current"></div>
+        <button class="btn btn-primary" onclick="saveWifiSettings()">Save Wi-Fi Settings</button>
+        <p style="color: var(--text-light); font-size: 0.9rem; margin-top: 10px;">Note: Boat will reboot after saving Wi-Fi settings.</p>
+      </div>
+      <div class="card">
+        <h2>Backup & Restore</h2>
+        <p style="color: var(--text-light); font-size: 0.9rem; margin-bottom: 20px;">Download all boat settings to a file, or restore settings from a previously saved backup file.</p>
+        <div class="button-group">
+            <a href="/backup_settings" class="btn btn-primary" download="baitboat_backup.json">Backup Settings</a>
+        </div>
+        <hr style="margin: 25px 0; border: none; border-top: 1px solid var(--border-color);">
+        <form id="restore_form" method="POST" action="/restore_settings" enctype="multipart/form-data">
+            <div class="form-group">
+                <label>Select Backup File to Restore</label>
+                <br>
+                <input type="file" name="restore" id="restore_file">
+                <label for="restore_file" class="btn btn-secondary">Choose File</label>
+                <span id="file_chosen" style="margin-left: 10px; color: var(--text-light); font-style: italic;">No file chosen</span>
+            </div>
+            <button type="submit" class="btn btn-danger">Restore & Reboot</button>
+            <p style="color: var(--text-light); font-size: 0.9rem; margin-top: 10px;">Warning: This will overwrite all current settings and reboot the boat.</p>
+        </form>
+      </div>
+    </div>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>
