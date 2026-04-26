@@ -1,43 +1,31 @@
 #ifndef AUTOPILOT_H
 #define AUTOPILOT_H
 
-#include <TinyGPSPlus.h>
-#include <Preferences.h>
 #include "types.h"
 #include "config.h"
+#include <Preferences.h>
 
-// ====== External Global Object/Variable Declarations ======
-extern TinyGPSPlus gps;
 extern Preferences preferences;
-extern SavedLocation savedLocations[5];
 extern PIDController steeringPID;
-extern PIDController throttlePID; // NEW
+extern PIDController throttlePID;
 extern Route currentRoute;
-extern BuzzerPatternControl alertBuzzerPatterns[NUM_ALERT_TYPES];
-extern FlashPatternControl alertLightFlashPatterns[NUM_ALERT_TYPES];
-extern AlertSetting alertSettings[NUM_ALERT_TYPES];
+extern SavedLocation savedLocations[5];
 extern Actuator actuators[];
 
-// ====== Function Declarations ======
 void initAutopilot();
-void handleAutopilotControl(BoatStatus& status);
+int calculateSteeringPID(const BoatStatus& status, double targetLat, double targetLng);
+int calculateSteeringPID(const BoatStatus& status, double targetHeading);
+int calculateThrottlePID(const BoatStatus& status, double distance);
 void handleRouteNavigation(BoatStatus& status);
 void handleLocationSaving(BoatStatus& status);
+void handleAutopilotControl(BoatStatus& status);
 void handleWaypointArrivalActions(BoatStatus& status);
 void saveCurrentLocation(const BoatStatus& status, int slotIndex, bool isHomeSave = false);
+void resetForNewTarget(BoatStatus& status, int targetWpIndex, bool isRth);
 double calculateDistance(double lat1, double lon1, double lat2, double lon2);
 double calculateBearing(double lat1, double lon1, double lat2, double lon2);
 double calculateCourseError(const BoatStatus& status, double targetLat, double targetLng);
-double calculateCourseError(const BoatStatus& status, double targetHeading); // Overloaded for compass return
-int calculateSteeringPID(const BoatStatus& status, double targetHeading); // Overloaded for compass return
-int calculateSteeringPID(const BoatStatus& status, double targetLat, double targetLng);
-int calculateThrottlePID(const BoatStatus& status, double distance); // NEW
-
-// ====== External Function Declarations from other modules ======
-void startBuzzerPattern(BuzzerPatternControl& pattern, const AlertSetting& settings);
-void startFlashPattern(FlashPatternControl& pattern, const AlertSetting& settings);
-void startActuator(Actuator &actuator);
-void voidMotors();
-void resetForNewTarget(BoatStatus& status, int targetWpIndex, bool isRth);
+double calculateCourseError(const BoatStatus& status, double targetHeading);
+bool checkPlaneCrossing(double originLat, double originLng, double targetLat, double targetLng, double currentLat, double currentLng);
 
 #endif

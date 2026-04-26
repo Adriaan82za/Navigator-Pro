@@ -29,19 +29,19 @@ const bool REVERSE_RC_THROTTLE = false;
 const bool REVERSE_RC_STEERING = false;
 
 // Autopilot dynamic braking configuration
-const float BRAKING_FACTOR = 1.2;          // Multiplier for speed to determine braking distance (e.g., 1.2 seconds out)
-const float MIN_BRAKING_DISTANCE = 2.0;    // Minimum distance to start braking, in meters
-const int BRAKING_REVERSE_PULSE = 1300;    // Throttle pulse for reverse braking (1500 is neutral)
+const float BRAKING_FACTOR = 1.2;          // Multiplier for speed to determine braking distance
+const float MIN_BRAKING_DISTANCE = 0.0;    // Minimum distance to start braking
+const int BRAKING_REVERSE_PULSE = 1300;    // Throttle pulse for reverse braking
 
-// NEW: Adaptive Braking Settings
-const float BRAKING_DURATION_MS_PER_MPS = 250.0; // Milliseconds of braking per meter/second of speed. (e.g., 2 m/s speed = 500ms braking)
-const unsigned long MIN_BRAKING_DURATION_MS = 200; // A short burst even at low speed.
-const unsigned long MAX_BRAKING_DURATION_MS = 1000; // Max braking time to prevent stalling.
+// Adaptive Braking Settings
+const float BRAKING_DURATION_MS_PER_MPS = 250.0;
+const unsigned long MIN_BRAKING_DURATION_MS = 200;
+const unsigned long MAX_BRAKING_DURATION_MS = 1000;
 
 // Settings persistence debounce
 const unsigned long SETTINGS_SAVE_DEBOUNCE_MS = 10000;
 
-// Light masks (for shift register control)
+// Light masks
 const byte HEADLIGHTS_MASK        = (1 << HEADLIGHTS);
 const byte FRONT_LEFT_LIGHT_MASK  = (1 << FRONT_LEFT_LIGHT);
 const byte FRONT_RIGHT_LIGHT_MASK = (1 << FRONT_RIGHT_LIGHT);
@@ -55,6 +55,11 @@ const byte RIGHT_LIGHTS_MASK = FRONT_RIGHT_LIGHT_MASK | REAR_RIGHT_LIGHT_MASK;
 // ESC Pulse Width Range
 const int ESC_MIN_PULSE = 900;
 const int ESC_MAX_PULSE = 2100;
+
+// --- NEW: COMPASS OFFSET ---
+// Add +90.0 if boat reads North when facing East.
+// Add -90.0 if boat reads North when facing West.
+const float IMU_HEADING_OFFSET = 0.0; 
 
 // ==================================
 // Function Declarations

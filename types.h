@@ -7,15 +7,11 @@
 #define NUM_IBUS_CHANNELS 10
 const int NUM_ALERT_TYPES = 11;
 
-// Simple struct to pass sensor data between functions
 struct xyzFloat {
   float x, y, z;
 };
 
-// -- Enum Definitions --
-enum Channels {
-  CH1 = 0, CH2, CH3, CH4, CH5, CH6, CH7, CH8, CH9, CH10
-};
+enum Channels { CH1 = 0, CH2, CH3, CH4, CH5, CH6, CH7, CH8, CH9, CH10 };
 
 enum BoatMode {
   MANUAL_MODE,
@@ -60,20 +56,14 @@ enum AlertType {
     ALERT_ARMED
 };
 
-// UPDATED based on your test results
 enum ShiftRegisterBits {
-  // Bit 0: Not Used
-  // Bit 1: Not Used
   BUZZER = 2,
   REAR_LEFT_LIGHT = 3,
-  FRONT_LEFT_LIGHT = 4, // "Left" from your test
-  HEADLIGHTS = 5,       // "Front" from your test
-  FRONT_RIGHT_LIGHT = 6, // "Right" from your test
+  FRONT_LEFT_LIGHT = 4, 
+  HEADLIGHTS = 5,       
+  FRONT_RIGHT_LIGHT = 6, 
   REAR_RIGHT_LIGHT = 7
 };
-
-
-// -- Struct Definitions --
 
 struct BuzzerPatternControl {
   bool active;
@@ -115,6 +105,7 @@ struct PIDController {
   double Kp, Ki, Kd;
   double integral;
   double previous_error;
+  double prev_derivative; 
   unsigned long last_time;
 };
 
@@ -135,11 +126,7 @@ struct AlertSetting {
   byte flashMask;
 };
 
-// =================================================================
-// Central Boat Status Struct
-// =================================================================
 struct BoatStatus {
-  // RC Control State
   struct {
     uint16_t channels[NUM_IBUS_CHANNELS];
     uint16_t prev_stick_ch1, prev_stick_ch2, prev_stick_ch5;
@@ -147,7 +134,6 @@ struct BoatStatus {
     volatile unsigned long last_update_ms;
   } rc;
 
-  // System & Mode State
   struct {
     BoatMode current;
     BoatMode previous;
@@ -156,11 +142,11 @@ struct BoatStatus {
     ArmingState arming_state;
   } mode;
 
-  // Navigation State
   struct {
     float heading, pitch, roll;
     float magnetic_declination;
     bool has_gps_fix;
+    bool sbas_active;   // <--- FIXED: ADDED SBAS BOOLEAN HERE
     unsigned long last_gps_signal_ms;
     uint8_t imu_accuracy;
     double latitude;
@@ -168,7 +154,6 @@ struct BoatStatus {
     float speed_mps;
   } nav;
 
-  // Autopilot State
   struct {
     bool engaged;
     bool rth_active;
@@ -179,32 +164,31 @@ struct BoatStatus {
     unsigned long drop_complete_time_ms;
     ArrivalState arrival_state;
     float braking_start_speed;
+    
     double anchor_lat;
     double anchor_lng;
     float anchor_radius;
+    float anchor_heading;  
+    double origin_lat;
+    double origin_lng;
   } autopilot;
 
-  // Vitals
   struct {
     float battery_voltage;
     unsigned long last_voltage_read_ms;
   } vitals;
 
-  // System persistence state for flash wear resistance
   struct {
     bool settings_dirty;
     unsigned long last_change_ms;
   } persistence;
   
-  // Failsafe state management
   struct {
     unsigned long rc_signal_lost_ms;
     unsigned long rc_failsafe_start_ms;
-    float compass_return_heading; // For GPS-less failsafe
+    float compass_return_heading; 
   } failsafe;
 
-
-  // Constructor to initialize default values
   BoatStatus() {
     for(int i=0; i<NUM_IBUS_CHANNELS; ++i) rc.channels[i] = (i==2) ? 1000:1500;
     rc.prev_stick_ch1 = 1500;
@@ -222,12 +206,12 @@ struct BoatStatus {
     nav.heading = 0.0; nav.pitch = 0.0; nav.roll = 0.0;
     nav.magnetic_declination = 0.0;
     nav.has_gps_fix = false;
+    nav.sbas_active = false; // <--- FIXED: INITIALIZED TO FALSE
     nav.last_gps_signal_ms = 0;
     nav.imu_accuracy = 0;
     nav.latitude = 0.0;
     nav.longitude = 0.0;
     nav.speed_mps = 0.0;
-
 
     autopilot.engaged = false;
     autopilot.rth_active = false;
@@ -241,6 +225,9 @@ struct BoatStatus {
     autopilot.anchor_lat = 0.0;
     autopilot.anchor_lng = 0.0;
     autopilot.anchor_radius = 2.0;
+    autopilot.anchor_heading = 0.0f;
+    autopilot.origin_lat = 0.0;
+    autopilot.origin_lng = 0.0;
 
     vitals.battery_voltage = 0.0;
     vitals.last_voltage_read_ms = 0;
@@ -250,7 +237,7 @@ struct BoatStatus {
 
     failsafe.rc_signal_lost_ms = 0;
     failsafe.rc_failsafe_start_ms = 0;
-    failsafe.compass_return_heading = -1.0; // Initialize to invalid
+    failsafe.compass_return_heading = -1.0; 
   }
 };
 

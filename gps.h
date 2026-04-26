@@ -1,11 +1,3 @@
-/*
- * Project: Bait Boat Control System (ESP32) - GPS Module
- * Description: Handles GPS sensor operations
- * Author: [Adriaan v.d.Westhuizen] & Gemini
- * Date: October 28, 2025
- * Version: 12.1.5 (Modularized)
- */
-
 #ifndef GPS_H
 #define GPS_H
 
@@ -13,6 +5,7 @@
 #include <HardwareSerial.h>
 #include <WMM_Tinier.h>
 #include "types.h"
+#include "kalman.h"
 
 // ==================================
 // GPS Configuration
@@ -35,5 +28,14 @@ void updateMagneticDeclination(BoatStatus& status);
 extern TinyGPSPlus gps;
 extern WMM_Tinier wmm;
 extern HardwareSerial gpsSerial;
+
+// Kalman filter instance (defined in main .ino)
+extern KalmanFilter kf;
+
+// Mutex for protecting kf (FIXED: Changed to SemaphoreHandle_t)
+extern SemaphoreHandle_t kalmanMutex;
+
+// Data mutex (for savedLocations / alertSettings) (FIXED: Changed to SemaphoreHandle_t)
+extern SemaphoreHandle_t dataMutex;
 
 #endif

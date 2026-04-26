@@ -1,6 +1,9 @@
 #ifndef KALMAN_H
 #define KALMAN_H
 
+// Global flag to prevent IMU from running physics before GPS locks
+extern bool isKalmanInitialized;
+
 // A simple 2D Kalman filter for fusing GPS and IMU data.
 // State vector: [latitude, longitude, velocity_lat, velocity_lon]
 
