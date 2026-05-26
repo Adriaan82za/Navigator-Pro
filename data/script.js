@@ -5,9 +5,6 @@ var currentCompassHeading = 0;
 var voiceAlertsEnabled = false;
 var lastReportedMode = "";
 
-// ==========================================
-// Native App Tab Control
-// ==========================================
 function showTab(tabName) {
   document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(link => link.classList.remove('active'));
@@ -15,9 +12,6 @@ function showTab(tabName) {
   event.currentTarget.classList.add('active');
 }
 
-// ==========================================
-// Haptic and Voice Alert System
-// ==========================================
 function triggerAlert(message, type = 'info') {
     showMessageBox(message, type);
     
@@ -36,9 +30,6 @@ function triggerAlert(message, type = 'info') {
     }
 }
 
-// ==========================================
-// Offline Radar Plotter (HTML5 Canvas)
-// ==========================================
 function drawRadar(data) {
     const canvas = document.getElementById('radarCanvas');
     if (!canvas) return;
@@ -112,9 +103,6 @@ function drawRadar(data) {
     }
 }
 
-// ==========================================
-// Telemetry Parsing (WebSockets / HTTP)
-// ==========================================
 function parseTelemetry(data) {
     telemetryData = data;
     
@@ -152,6 +140,10 @@ function parseTelemetry(data) {
         document.getElementById('low_batt_v').value = data.low_batt;
         document.getElementById('low_batt_rth_enable').checked = data.low_batt_rth;
         
+        if (document.getElementById('brake_dist') && data.hasOwnProperty('brake_dist')) {
+            document.getElementById('brake_dist').value = data.brake_dist;
+        }
+        
         if(document.getElementById('wifi_ssid')) {
             document.getElementById('wifi_ssid').value = data.wifi_ssid;
         }
@@ -160,15 +152,14 @@ function parseTelemetry(data) {
     document.getElementById('battery').innerText = data.battery;
     document.getElementById('gps_fix').innerText = data.gps_fix;
 
-    // --- NEW: SBAS/WAAS UI LOGIC ---
     if (data.hasOwnProperty('sbas_active')) {
         const sbasElement = document.getElementById('sbas_status');
         if (data.sbas_active) {
             sbasElement.innerText = "YES (Sub-Meter)";
-            sbasElement.style.color = "#4ade80"; // Turn bright green on lock
+            sbasElement.style.color = "#4ade80"; 
         } else {
             sbasElement.innerText = "NO (Standard)";
-            sbasElement.style.color = "var(--text-light)"; // Normal gray text when searching
+            sbasElement.style.color = "var(--text-light)"; 
         }
     }
 
@@ -236,9 +227,6 @@ function updateTelemetryHTTP() {
     fetch('/telemetry').then(r => r.json()).then(parseTelemetry).catch(e => console.log('HTTP Fetch Error'));
 }
 
-// ==========================================
-// Initialization
-// ==========================================
 window.onload = () => {
     const themeSwitch = document.getElementById('themeSwitch');
     function setTheme(isDark) {
@@ -273,9 +261,6 @@ window.onload = () => {
     updateTelemetryHTTP();
 };
 
-// ==========================================
-// Form Submissions and UI Actions
-// ==========================================
 function showMessageBox(message, type = 'success', callback = null) {
   const existingMessageBox = document.getElementById('custom-message-box');
   if (existingMessageBox) existingMessageBox.remove(); 
@@ -332,7 +317,19 @@ function saveWifiSettings() {
 }
 
 function savePIDGains() { handleApiResponse(fetch('/save_pid', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ p: parseFloat(document.getElementById('pid_p').value), i: parseFloat(document.getElementById('pid_i').value), d: parseFloat(document.getElementById('pid_d').value) }) })); }
-function saveSystemSettings() { handleApiResponse(fetch('/save_system_settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ low_batt: parseFloat(document.getElementById('low_batt_v').value), low_batt_rth: document.getElementById('low_batt_rth_enable').checked }) })); }
+
+function saveSystemSettings() { 
+    handleApiResponse(fetch('/save_system_settings', { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ 
+            low_batt: parseFloat(document.getElementById('low_batt_v').value), 
+            brake_dist: parseFloat(document.getElementById('brake_dist').value),
+            low_batt_rth: document.getElementById('low_batt_rth_enable').checked 
+        }) 
+    })); 
+}
+
 function addWaypointToRoute() {
     const sel = document.getElementById('waypoint_select');
     if (!sel.value) return showMessageBox('Select a waypoint.', 'error');
@@ -346,9 +343,6 @@ function saveLocationName(i) { handleApiResponse(fetch('/save_location_name', { 
 function saveLocationActions(i) { handleApiResponse(fetch('/set_location_actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locationIndex: i, dropLeftHopper: document.getElementById(`dlh_${i}`).checked, dropRightHopper: document.getElementById(`drh_${i}`).checked, releaseLeftHook: document.getElementById(`rlh_${i}`).checked, releaseRightHook: document.getElementById(`rrh_${i}`).checked, autoReturnToHome: document.getElementById(`rth_${i}`).checked }) })); }
 function deleteLocation(i) { showMessageBox('Delete Waypoint?', 'confirm', res => { if(res) fetch('/delete_location', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locationIndex: i }) }).then(r => r.text()).then(d => { showMessageBox(d); updateTelemetryHTTP(); }); }); }
 
-// ==========================================
-// Native WT901 Calibration Commands
-// ==========================================
 function startIMUCalibration() {
     fetch('/save_imu_cal', { 
         method: 'POST', 
@@ -367,4 +361,13 @@ function finishIMUCalibration() {
     })
     .then(r => r.json())
     .then(data => showMessageBox(data.message, data.success ? 'success' : 'error'));
+}
+
+// ---> NEW AUTOTUNE HANDLER <---
+function startAutoTune() {
+    showMessageBox('Warning: Boat will drive forward and snake aggressively. Ensure clear water ahead!', 'confirm', res => { 
+        if(res) {
+            handleApiResponse(fetch('/start_autotune', { method: 'POST' }));
+        } 
+    }); 
 }

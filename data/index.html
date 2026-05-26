@@ -131,12 +131,16 @@
           <div class="form-group"><label>Ki</label><input type="number" step="0.01" id="pid_i"></div>
           <div class="form-group"><label>Kd</label><input type="number" step="0.05" id="pid_d"></div>
         </div>
-        <button class="btn btn-primary" onclick="savePIDGains()">Save PID Gains</button>
+        <div class="button-group" style="margin-top: 15px;">
+          <button class="btn btn-primary" onclick="savePIDGains()">Save PID Gains</button>
+          <button class="btn btn-secondary" onclick="startAutoTune()">Start Auto-Tune</button>
+        </div>
       </div>
 
       <div class="card">
         <h2>System Settings</h2>
         <div class="form-group"><label>Low Battery Alert (V)</label><input type="number" step="0.1" id="low_batt_v"></div>
+        <div class="form-group"><label>Braking Distance (m)</label><input type="number" step="0.5" id="brake_dist"></div>
         <div class="form-group checkbox-container">
             <input type="checkbox" id="low_batt_rth_enable">
             <label for="low_batt_rth_enable"><strong>Enable Low Battery RTH</strong></label>
