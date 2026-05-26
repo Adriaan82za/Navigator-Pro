@@ -17,7 +17,8 @@ enum BoatMode {
   MANUAL_MODE,
   AUTOPILOT_MODE,
   LOCATION_SAVE_MODE,
-  ANCHOR_MODE
+  ANCHOR_MODE,
+  AUTOTUNE_MODE
 };
 
 enum ArmingState {
@@ -146,7 +147,7 @@ struct BoatStatus {
     float heading, pitch, roll;
     float magnetic_declination;
     bool has_gps_fix;
-    bool sbas_active;   // <--- FIXED: ADDED SBAS BOOLEAN HERE
+    bool sbas_active;   
     unsigned long last_gps_signal_ms;
     uint8_t imu_accuracy;
     double latitude;
@@ -164,6 +165,7 @@ struct BoatStatus {
     unsigned long drop_complete_time_ms;
     ArrivalState arrival_state;
     float braking_start_speed;
+    float braking_distance;
     
     double anchor_lat;
     double anchor_lng;
@@ -206,7 +208,7 @@ struct BoatStatus {
     nav.heading = 0.0; nav.pitch = 0.0; nav.roll = 0.0;
     nav.magnetic_declination = 0.0;
     nav.has_gps_fix = false;
-    nav.sbas_active = false; // <--- FIXED: INITIALIZED TO FALSE
+    nav.sbas_active = false; 
     nav.last_gps_signal_ms = 0;
     nav.imu_accuracy = 0;
     nav.latitude = 0.0;
@@ -222,6 +224,7 @@ struct BoatStatus {
     autopilot.drop_complete_time_ms = 0;
     autopilot.arrival_state = AP_IDLE;
     autopilot.braking_start_speed = 0.0f;
+    autopilot.braking_distance = 3.0f;
     autopilot.anchor_lat = 0.0;
     autopilot.anchor_lng = 0.0;
     autopilot.anchor_radius = 2.0;

@@ -1,10 +1,10 @@
 /*
  * Project: Bait Boat Control System (ESP32) - Configuration Module
  * Description: Handles NVS/Preferences access for settings persistence
- * Updated: Removed portMAX_DELAY to prevent system hangs.
+ * Updated: Removed portMAX_DELAY, disabled NVS log, deferred NVS write, added brake_dist.
  * Author: [Adriaan v.d.Westhuizen]
  * Date: November 04, 2025
- * Version: 12.3.1 (Stability & Mutex Fix)
+ * Version: 12.3.2
  */
 
 #include <Arduino.h>
@@ -28,10 +28,12 @@ void loadAllSettings() {
         
         float low_batt = preferences.getFloat("low_batt", 10.5);
         bool lb_rth = preferences.getBool("lb_rth_en", false);
+        float brake_dist = preferences.getFloat("brake_dist", 3.0);
         
         if (xSemaphoreTake(boatStatusMutex, 100 / portTICK_PERIOD_MS) == pdTRUE) {
             boatStatus.mode.low_battery_threshold = low_batt;
             boatStatus.autopilot.low_battery_rth_enabled = lb_rth;
+            boatStatus.autopilot.braking_distance = brake_dist;
             xSemaphoreGive(boatStatusMutex);
         }
 
@@ -87,27 +89,26 @@ void loadAllSettings() {
 
         preferences.end();
         xSemaphoreGive(nvsMutex);
-    } else {
-        Serial.println("WARNING: Failed to acquire nvsMutex in loadAllSettings");
     }
 }
 
 void handleSettingsPersistence(BoatStatus& status) {
   bool isDirty = false;
   unsigned long lastChange = 0;
+  bool isArmed = false;
 
   if (xSemaphoreTake(boatStatusMutex, 5) == pdTRUE) {
       isDirty = status.persistence.settings_dirty;
       lastChange = status.persistence.last_change_ms;
+      isArmed = status.mode.is_armed;
       xSemaphoreGive(boatStatusMutex);
   }
 
-  if (isDirty && (millis() - lastChange > SETTINGS_SAVE_DEBOUNCE_MS)) {
+  if (isDirty && !isArmed && (millis() - lastChange > SETTINGS_SAVE_DEBOUNCE_MS)) {
 
     if (xSemaphoreTake(nvsMutex, 100) == pdTRUE) {
         preferences.begin("baitboat", false);
         
-        // PID
         if (xSemaphoreTake(pidMutex, 10) == pdTRUE) {
             preferences.putFloat("pid_p", steeringPID.Kp);
             preferences.putFloat("pid_i", steeringPID.Ki);
@@ -115,14 +116,13 @@ void handleSettingsPersistence(BoatStatus& status) {
             xSemaphoreGive(pidMutex);
         }
 
-        // System
         if (xSemaphoreTake(boatStatusMutex, 10) == pdTRUE) {
             preferences.putFloat("low_batt", status.mode.low_battery_threshold);
             preferences.putBool("lb_rth_en", status.autopilot.low_battery_rth_enabled);
+            preferences.putFloat("brake_dist", status.autopilot.braking_distance);
             xSemaphoreGive(boatStatusMutex);
         }
 
-        // Alerts & Locations
         if (xSemaphoreTake(dataMutex, 20) == pdTRUE) {
             const char* keys[] = {"hs", "ws", "gf", "ae", "lh", "rh", "lk", "rk", "lb", "wr", "ar"};
             char key_buffer[25];

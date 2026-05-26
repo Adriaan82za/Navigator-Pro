@@ -1,9 +1,6 @@
 /*
  * Project: Bait Boat Control System (ESP32) - Telemetry Module
  * Description: Handles the web server and provides a web-based UI.
- * Author: [Adriaan v.d.Westhuizen]
- * Date: April 13, 2026
- * Version: 13.7.0 (SBAS / WAAS Integration)
  */
 
 #include "telemetry.h"
@@ -14,7 +11,6 @@
 #include "imu.h"
 #include <TinyGPSPlus.h> 
 
-// External Mutexes
 extern SemaphoreHandle_t boatStatusMutex;
 extern SemaphoreHandle_t nvsMutex;
 extern SemaphoreHandle_t pidMutex;
@@ -22,17 +18,12 @@ extern SemaphoreHandle_t routeMutex;
 extern SemaphoreHandle_t dataMutex;
 extern SemaphoreHandle_t i2cMutex;
 
-// Import the confirmed orientation ID from imu.cpp
 extern int currentOrientationIndex; 
-
-// Declare the external GPS object so the compiler can find it
 extern TinyGPSPlus gps; 
 
-// State variable to track the outcome of the restore process
 enum RestoreStatus { RESTORE_IDLE, RESTORE_SUCCESS, RESTORE_FAILED };
 static volatile RestoreStatus restoreUploadStatus = RESTORE_IDLE;
 
-// Helper function to flag that settings need to be saved
 void flagSettingsChanged() {
     if (xSemaphoreTake(boatStatusMutex, 10) == pdTRUE) {
         boatStatus.persistence.settings_dirty = true;
@@ -41,7 +32,6 @@ void flagSettingsChanged() {
     }
 }
 
-// Helper function for sending standardized JSON responses
 void sendJsonResponse(int code, bool success, const char* message) {
     DynamicJsonDocument doc(256); 
     doc["success"] = success;
@@ -51,7 +41,6 @@ void sendJsonResponse(int code, bool success, const char* message) {
     server.send(code, "application/json", response);
 }
 
-// Helper function to get the content type for a given file extension
 String getContentType(String filename) {
   if (server.hasArg("download")) return "application/octet-stream";
   else if (filename.endsWith(".html")) return "text/html";
@@ -62,7 +51,6 @@ String getContentType(String filename) {
   return "text/plain";
 }
 
-// Helper function to serve files from SPIFFS
 bool handleFileRead(String path) {
   if (path.endsWith("/")) path += "index.html";
   String contentType = getContentType(path);
@@ -75,18 +63,13 @@ bool handleFileRead(String path) {
   return false;
 }
 
-// Forward declaration for the upload handler
 void handleRestoreUpload(); 
 
-// ==============================
-// Web Server Route Setup
-// ==============================
 void setupWebServerRoutes() {
   if (MDNS.begin("baitboat")) {
     MDNS.addService("http", "tcp", 80);
   }
 
-  // API endpoint for all boat telemetry data
   server.on("/telemetry", HTTP_GET, [](){
     DynamicJsonDocument doc(4096); 
     
@@ -94,7 +77,6 @@ void setupWebServerRoutes() {
     double localLng = 0.0;
     bool localHasFix = false;
 
-    // 1. Acquire Status Mutex
     if (xSemaphoreTake(boatStatusMutex, 20) == pdTRUE) {
         doc["ip_address"] = WiFi.softAPIP().toString();
 
@@ -103,6 +85,7 @@ void setupWebServerRoutes() {
           case AUTOPILOT_MODE: doc["mode"] = "AUTOPILOT"; break;
           case LOCATION_SAVE_MODE: doc["mode"] = "LOCATION SAVE"; break;
           case ANCHOR_MODE: doc["mode"] = "ANCHOR"; break;
+          case AUTOTUNE_MODE: doc["mode"] = "AUTO-TUNING"; break; // <--- UPDATE
         }
 
         doc["armed"] = boatStatus.mode.is_armed;
@@ -127,13 +110,13 @@ void setupWebServerRoutes() {
 
         doc["low_batt"] = boatStatus.mode.low_battery_threshold;
         doc["low_batt_rth"] = boatStatus.autopilot.low_battery_rth_enabled;
+        doc["brake_dist"] = boatStatus.autopilot.braking_distance;
         doc["declination"] = String(boatStatus.nav.magnetic_declination, 2);
         doc["battery"] = String(boatStatus.vitals.battery_voltage, 2);
         
         localHasFix = boatStatus.nav.has_gps_fix;
         doc["gps_fix"] = localHasFix ? "YES" : "NO";
         
-        // --- FIXED: ADDED SBAS TELEMETRY PUSH HERE ---
         doc["sbas_active"] = boatStatus.nav.sbas_active;
         
         if (localHasFix) {
@@ -164,7 +147,6 @@ void setupWebServerRoutes() {
         doc["gps_time"] = "Waiting for Sync...";
     }
 
-    // 2. Acquire PID Mutex
     if (xSemaphoreTake(pidMutex, 20) == pdTRUE) {
         JsonObject pid_obj = doc.createNestedObject("pid");
         pid_obj["p"] = steeringPID.Kp;
@@ -173,7 +155,6 @@ void setupWebServerRoutes() {
         xSemaphoreGive(pidMutex);
     }
 
-    // 3. Acquire Route Mutex
     if (xSemaphoreTake(routeMutex, 20) == pdTRUE) {
         JsonObject route_obj = doc.createNestedObject("route");
         switch(currentRoute.status) {
@@ -185,7 +166,6 @@ void setupWebServerRoutes() {
         xSemaphoreGive(routeMutex);
     }
 
-    // 4. Acquire Data Mutex (Alerts & Locations)
     if (xSemaphoreTake(dataMutex, 50) == pdTRUE) {
         if (doc.containsKey("waypoint_idx")) {
             int idx = doc["waypoint_idx"];
@@ -238,6 +218,21 @@ void setupWebServerRoutes() {
     server.send(200, "application/json", response);
   });
 
+  server.on("/start_autotune", HTTP_POST, [](){
+    if (xSemaphoreTake(boatStatusMutex, 50) == pdTRUE) {
+        if (!boatStatus.nav.has_gps_fix) {
+            sendJsonResponse(400, false, "Cannot Auto-Tune without a solid GPS Fix!");
+            xSemaphoreGive(boatStatusMutex);
+            return;
+        }
+        boatStatus.mode.current = AUTOTUNE_MODE;
+        xSemaphoreGive(boatStatusMutex);
+        sendJsonResponse(200, true, "Auto-Tune Started! Boat will weave 5 times.");
+    } else {
+        sendJsonResponse(503, false, "System busy.");
+    }
+  });
+
   server.on("/save_pid", HTTP_POST, [](){
     DynamicJsonDocument doc(256);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
@@ -264,17 +259,21 @@ void setupWebServerRoutes() {
   server.on("/save_system_settings", HTTP_POST, [](){
     DynamicJsonDocument doc(256);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
-    if(error || !doc.containsKey("low_batt") || !doc.containsKey("low_batt_rth")) {
+    if(error || !doc.containsKey("low_batt") || !doc.containsKey("low_batt_rth") || !doc.containsKey("brake_dist")) {
       sendJsonResponse(400, false, "Invalid JSON or missing keys."); return;
     }
+    
     float low_batt = doc["low_batt"];
-    if (isnan(low_batt) || low_batt <= 0 || low_batt > 20.0) {
-      sendJsonResponse(400, false, "Invalid low battery threshold."); return;
+    float brake_dist = doc["brake_dist"];
+    
+    if (isnan(low_batt) || low_batt <= 0 || low_batt > 20.0 || isnan(brake_dist) || brake_dist < 0) {
+      sendJsonResponse(400, false, "Invalid values."); return;
     }
 
     if (xSemaphoreTake(boatStatusMutex, 50) == pdTRUE) {
         boatStatus.mode.low_battery_threshold = low_batt;
         boatStatus.autopilot.low_battery_rth_enabled = doc["low_batt_rth"];
+        boatStatus.autopilot.braking_distance = brake_dist;
         xSemaphoreGive(boatStatusMutex);
         flagSettingsChanged();
         sendJsonResponse(200, true, "System settings updated.");
@@ -468,7 +467,6 @@ void setupWebServerRoutes() {
     }
   });
 
-  // --- FULL SETTINGS BACKUP HANDLER ---
   server.on("/backup_settings", HTTP_GET, [](){
       if (xSemaphoreTake(nvsMutex, 1000) == pdTRUE) {
           preferences.begin("baitboat", true);
@@ -479,6 +477,7 @@ void setupWebServerRoutes() {
           doc["pid_d"] = preferences.getFloat("pid_d", 0.5);
           doc["low_batt"] = preferences.getFloat("low_batt", 10.5);
           doc["lb_rth_en"] = preferences.getBool("lb_rth_en", false);
+          doc["brake_dist"] = preferences.getFloat("brake_dist", 3.0);
 
           const char* keys[] = {"hs", "ws", "gf", "ae", "lh", "rh", "lk", "rk", "lb", "wr", "ar"};
           char key_buffer[25];
@@ -576,9 +575,6 @@ void setupWebServerRoutes() {
   server.begin();
 }
 
-// ==============================
-// Restore Settings Upload Handler
-// ==============================
 void handleRestoreUpload() {
   HTTPUpload& upload = server.upload();
 
@@ -603,6 +599,7 @@ void handleRestoreUpload() {
         if (doc->containsKey("pid_d")) preferences.putFloat("pid_d", (*doc)["pid_d"]);
         if (doc->containsKey("low_batt")) preferences.putFloat("low_batt", (*doc)["low_batt"]);
         if (doc->containsKey("lb_rth_en")) preferences.putBool("lb_rth_en", (*doc)["lb_rth_en"]);
+        if (doc->containsKey("brake_dist")) preferences.putFloat("brake_dist", (*doc)["brake_dist"]);
 
         const char* keys[] = {"hs", "ws", "gf", "ae", "lh", "rh", "lk", "rk", "lb", "wr", "ar"};
         char key_buffer[25];

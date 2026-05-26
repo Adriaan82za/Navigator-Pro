@@ -1,6 +1,8 @@
 #include "autopilot.h"
 #include <Arduino.h>
 #include <math.h>
+#include <ESP32Servo.h>
+#include <Preferences.h>
 
 extern SemaphoreHandle_t boatStatusMutex;
 extern SemaphoreHandle_t nvsMutex;
@@ -8,10 +10,34 @@ extern SemaphoreHandle_t pidMutex;
 extern SemaphoreHandle_t routeMutex;
 extern SemaphoreHandle_t dataMutex;
 
-// FIX: Added missing global declarations for alerts and motors
 extern AlertSetting alertSettings[];
 extern BuzzerPatternControl alertBuzzerPatterns[];
 extern FlashPatternControl alertLightFlashPatterns[];
+
+extern Servo escLeft;
+extern Servo escRight;
+extern Actuator actuators[];
+
+// External declarations to fix scope errors
+extern Preferences preferences;
+extern PIDController steeringPID;
+extern PIDController throttlePID;
+extern Route currentRoute;
+extern SavedLocation savedLocations[5];
+
+#ifndef RC_MID_POINT
+#define RC_MID_POINT 1500
+#define BRAKING_REVERSE_PULSE 1300
+#define MIN_BRAKING_DURATION_MS 500
+#define MAX_BRAKING_DURATION_MS 3000
+#define BRAKING_DURATION_MS_PER_MPS 1000
+#endif
+
+// Stick Thresholds
+#ifndef STICK_HIGH_THRESHOLD
+#define STICK_HIGH_THRESHOLD 1800
+#define STICK_LOW_THRESHOLD 1200
+#endif
 
 void startBuzzerPattern(BuzzerPatternControl& pattern, const AlertSetting& settings);
 void startFlashPattern(FlashPatternControl& pattern, const AlertSetting& settings);
@@ -30,12 +56,8 @@ static int calculatePID(double error, PIDController& pid, SemaphoreHandle_t& mux
             return 0;
         }
 
-        double p_term = pid.Kp * error;
-
         double dt_sec = (double)dt / 1000.0;
-        pid.integral += error * dt_sec;
-        pid.integral = constrain(pid.integral, -500.0, 500.0); 
-        double i_term = pid.Ki * pid.integral;
+        double p_term = pid.Kp * error;
 
         double error_change = error - pid.previous_error;
 
@@ -47,9 +69,19 @@ static int calculatePID(double error, PIDController& pid, SemaphoreHandle_t& mux
         double raw_derivative = error_change / dt_sec;
         double derivative = (0.3 * raw_derivative) + (0.7 * pid.prev_derivative);
         pid.prev_derivative = derivative;
-        
         double d_term = pid.Kd * derivative;
-        double pid_output = p_term + i_term + d_term;
+
+        // ---> ANTI-WINDUP LOGIC <---
+        double current_i_term = pid.Ki * pid.integral;
+        double test_output = p_term + current_i_term + d_term;
+
+        if (test_output > -500.0 && test_output < 500.0) {
+             pid.integral += error * dt_sec;
+             pid.integral = constrain(pid.integral, -500.0, 500.0); 
+        }
+        
+        double final_i_term = pid.Ki * pid.integral;
+        double pid_output = p_term + final_i_term + d_term;
 
         pid.previous_error = error;
         pid.last_time = current_time;
@@ -185,7 +217,13 @@ void handleRouteNavigation(BoatStatus& status) {
         return;
     }
 
-    if (route_status != ROUTE_ACTIVE || !status.nav.has_gps_fix) {
+    bool has_gps_fix = false;
+    if (xSemaphoreTake(boatStatusMutex, 5) == pdTRUE) {
+        has_gps_fix = status.nav.has_gps_fix;
+        xSemaphoreGive(boatStatusMutex);
+    }
+
+    if (route_status != ROUTE_ACTIVE || !has_gps_fix) {
         status.autopilot.engaged = false;
         return;
     }
@@ -196,7 +234,7 @@ void handleRouteNavigation(BoatStatus& status) {
         xSemaphoreGive(dataMutex);
     }
 
-    if (route_step < route_wp_count) {
+    if (route_step < route_wp_count && route_step < MAX_ROUTE_WAYPOINTS) {
         int targetWpIndex = -1;
         if (xSemaphoreTake(routeMutex, 5) == pdTRUE) {
             targetWpIndex = currentRoute.waypoints[route_step];
@@ -226,9 +264,16 @@ void handleRouteNavigation(BoatStatus& status) {
 }
 
 void handleLocationSaving(BoatStatus& status) {
-  if (!status.nav.has_gps_fix) {
+  bool has_gps_fix = false;
+  if (xSemaphoreTake(boatStatusMutex, 5) == pdTRUE) {
+      has_gps_fix = status.nav.has_gps_fix;
+      xSemaphoreGive(boatStatusMutex);
+  }
+
+  if (!has_gps_fix) {
     return;
   }
+  
   if (checkStickFlick(status.rc.channels[CH5], status.rc.prev_stick_ch5, true)) {
     saveCurrentLocation(status, 0, true); 
   }
@@ -257,7 +302,13 @@ void handleAutopilotControl(BoatStatus& status) {
       xSemaphoreGive(routeMutex);
   }
   
-  if (!status.nav.has_gps_fix || route_status == ROUTE_ACTIVE || route_status == ROUTE_PAUSED) {
+  bool has_gps_fix = false;
+  if (xSemaphoreTake(boatStatusMutex, 5) == pdTRUE) {
+      has_gps_fix = status.nav.has_gps_fix;
+      xSemaphoreGive(boatStatusMutex);
+  }
+
+  if (!has_gps_fix || route_status == ROUTE_ACTIVE || route_status == ROUTE_PAUSED) {
     return; 
   }
   
@@ -267,8 +318,10 @@ void handleAutopilotControl(BoatStatus& status) {
       xSemaphoreGive(dataMutex);
   }
 
+  static bool ch8WasActive = false; 
   bool ch8Activated = status.rc.channels[CH8] > RC_MID_POINT; 
-  if (status.mode.current == AUTOPILOT_MODE && ch8Activated && homeIsSet) {
+
+  if (status.mode.current == AUTOPILOT_MODE && ch8Activated && !ch8WasActive && homeIsSet) {
       if (!status.autopilot.rth_active) {
           if (route_status != ROUTE_INACTIVE) {
               if (xSemaphoreTake(routeMutex, 10) == pdTRUE) {
@@ -278,13 +331,15 @@ void handleAutopilotControl(BoatStatus& status) {
           }
           resetForNewTarget(status, 0, true);
       }
-  } else {
+  } else if (!ch8Activated && ch8WasActive) {
       if (status.autopilot.rth_active) {
           status.autopilot.engaged = false;
           voidMotors();
       }
       status.autopilot.rth_active = false;
   }
+  
+  ch8WasActive = ch8Activated;
 
   if (!status.autopilot.rth_active) {
     int desiredWaypointIndex = -1;
@@ -308,7 +363,6 @@ void handleAutopilotControl(BoatStatus& status) {
   }
 }
 
-// FIX: Restored the handleWaypointArrivalActions function that was accidentally removed
 void handleWaypointArrivalActions(BoatStatus& status) {
   unsigned long now = millis();
   int wp_index = status.autopilot.target_waypoint_index;
@@ -511,4 +565,110 @@ double calculateCourseError(const BoatStatus& status, double targetHeading) {
   if (courseDiff > 180) courseDiff -= 360;
   if (courseDiff < -180) courseDiff += 360;
   return courseDiff;
+}
+
+// ---> NEW TYREUS-LUYBEN MARINE AUTO-TUNER <---
+void handleAutoTune(BoatStatus& status, int& targetSpeedLeft, int& targetSpeedRight) {
+    static unsigned long cycleStartTime = 0;
+    static double currentPeakError = 0;
+    static double amplitudeSum = 0;
+    static bool relayState = true; 
+    static int tuningCycles = 0;
+    static double periodSum = 0;
+    static double targetHeading = 0;
+    static bool autotune_initialized = false;
+
+    if (status.mode.current != status.mode.previous || !autotune_initialized) {
+        targetHeading = status.nav.heading;
+        cycleStartTime = millis();
+        currentPeakError = 0;
+        amplitudeSum = 0;
+        periodSum = 0;
+        tuningCycles = 0;
+        relayState = true;
+        autotune_initialized = true;
+        
+        if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+            startBuzzerPattern(alertBuzzerPatterns[ALERT_AP_ENGAGED], alertSettings[ALERT_AP_ENGAGED]);
+            xSemaphoreGive(dataMutex);
+        }
+    }
+
+    if (!status.nav.has_gps_fix) {
+        status.mode.current = MANUAL_MODE;
+        targetSpeedLeft = RC_MID_POINT;
+        targetSpeedRight = RC_MID_POINT;
+        autotune_initialized = false;
+        return;
+    }
+
+    int baseSpeed = 1700;
+    int relayAmplitude = 250; 
+    
+    double error = calculateCourseError(status, targetHeading);
+    
+    // Track the peak overshoot for THIS specific cycle
+    if (abs(error) > currentPeakError) {
+        currentPeakError = abs(error);
+    }
+
+    // The Relay: Swap direction when error crosses zero
+    if (error > 0 && relayState == false) {
+        relayState = true;
+        unsigned long now = millis();
+        
+        if (cycleStartTime > 0 && currentPeakError > 0) {
+            double period = (now - cycleStartTime) / 1000.0;
+            // Discard the very first wiggle as it contains the initial acceleration momentum
+            if (tuningCycles > 0) {
+                periodSum += period;
+                amplitudeSum += currentPeakError;
+            }
+            tuningCycles++;
+        }
+        cycleStartTime = now;
+        currentPeakError = 0; // Reset peak tracker for the next wiggle
+        
+    } else if (error < 0 && relayState == true) {
+        relayState = false;
+    }
+
+    int steeringAdjust = relayState ? relayAmplitude : -relayAmplitude;
+    targetSpeedLeft = baseSpeed + steeringAdjust;
+    targetSpeedRight = baseSpeed - steeringAdjust;
+
+    // Wait for 6 crossings (1 discarded + 5 measured)
+    if (tuningCycles >= 6) { 
+        double avgAmplitude = amplitudeSum / 5.0;
+        double avgPeriod = periodSum / 5.0;
+
+        if (avgAmplitude > 0) {
+            double ultimateGain = (4.0 * relayAmplitude) / (PI * avgAmplitude);
+            
+            // Tyreus-Luyben Tuning Formulas (Stabilized for marine/heavy inertia)
+            if(xSemaphoreTake(pidMutex, 10) == pdTRUE) {
+                steeringPID.Kp = ultimateGain / 3.2;
+                steeringPID.Ki = steeringPID.Kp / (2.2 * avgPeriod); 
+                steeringPID.Kd = steeringPID.Kp * (avgPeriod / 6.3); 
+                xSemaphoreGive(pidMutex);
+            }
+            
+            if (xSemaphoreTake(boatStatusMutex, 10) == pdTRUE) {
+                status.persistence.settings_dirty = true;
+                status.persistence.last_change_ms = millis();
+                xSemaphoreGive(boatStatusMutex);
+            }
+        }
+
+        status.mode.current = MANUAL_MODE;
+        targetSpeedLeft = RC_MID_POINT;
+        targetSpeedRight = RC_MID_POINT;
+        autotune_initialized = false;
+        
+        if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+            // Signal completion
+            startBuzzerPattern(alertBuzzerPatterns[ALERT_HOME_SAVED], alertSettings[ALERT_HOME_SAVED]);
+            xSemaphoreGive(dataMutex);
+        }
+    }
 }

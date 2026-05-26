@@ -1,6 +1,7 @@
 /*
  * Project: Bait Boat Control System (ESP32) - Main
- * Architecture: GPS is Boss, IMU is Compass. Live Logging Enabled.
+ * Architecture: GPS is Boss, IMU is Compass.
+ * Live Logging Disabled. CH9 PID Tuning Removed.
  */
 
 #include <HardwareSerial.h>
@@ -45,7 +46,7 @@ const int ADC_RES = 4095, VOLTAGE_SAMPLES = 10;
 #define SR_RCLK 33
 #define SR_SRCLK 32
 
-const unsigned long IBUS_TIMEOUT = 100;
+const unsigned long IBUS_TIMEOUT = 250; 
 const unsigned long LOW_BATT_DEBOUNCE_MS = 3000;
 const int FAILSAFE_CHANNEL_THRESHOLD = 1700;
 const unsigned long ACTUATOR_COOLDOWN_MS = 2000;
@@ -53,13 +54,17 @@ const float MOTOR_SMOOTHING_ALPHA = 0.2;
 const unsigned long FAILSAFE_RTH_TRIGGER_MS = 5000;
 const unsigned long LOOP_INTERVAL_MS = 5;
 
+Servo escLeft;
+Servo escRight;
+int smoothedLeft = 1500;
+int smoothedRight = 1500;
+
 TinyGPSPlus gps;
 WMM_Tinier wmm;
 HardwareSerial gpsSerial(1);
 HardwareSerial ibusSerial(2);
 Preferences preferences;
 WebServer server(80);
-Servo escLeft, escRight;
 KalmanFilter kf;
 
 BoatStatus boatStatus;
@@ -69,7 +74,6 @@ PIDController throttlePID;
 Route currentRoute;
 char ssid[33];
 
-static int smoothedLeft = 1500, smoothedRight = 1500;
 Actuator actuators[] = {
   {OPEN_LEFT_BAIT_HOPPER_PIN, false, 0, false, 500},
   {OPEN_RIGHT_BAIT_HOPPER_PIN, false, 0, false, 500},
@@ -77,7 +81,6 @@ Actuator actuators[] = {
   {RELEASE_RIGHT_HOOK_PIN, false, 0, false, 350},
   {AUXILIARY_PIN, false, 0, false, 0}
 };
-
 const int NUM_ACTUATORS = sizeof(actuators) / sizeof(actuators[0]);
 unsigned long lastActuatorTime[5] = {0, 0, 0, 0, 0};
 
@@ -117,8 +120,6 @@ void setupIO();
 void setupESCs();
 void setupLightsAndBuzzer();
 void voidMotors();
-void handleManualPidTuning(BoatStatus& status);
-void handleDynamicPID(BoatStatus& status);
 void handleArming(BoatStatus& status);
 void handleCompassReturn(BoatStatus& status);
 void updateSingleBuzzerPattern(BuzzerPatternControl& pattern);
@@ -127,11 +128,17 @@ void updateSingleFlashPattern(FlashPatternControl& pattern);
 void manageAllLightFlashAlerts();
 
 void setup() {
-  Serial.begin(115200);
-
   if(!SPIFFS.begin(true)){
-    Serial.println("An Error has occurred while mounting SPIFFS");
+    // File system failed to mount
   }
+
+  esp_task_wdt_config_t wdt_config = {
+      .timeout_ms = 3000,
+      .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
+      .trigger_panic = true
+  };
+  esp_task_wdt_init(&wdt_config);
+  esp_task_wdt_add(NULL); 
 
   boatStatusMutex = xSemaphoreCreateMutex();
   nvsMutex = xSemaphoreCreateMutex();
@@ -149,7 +156,7 @@ void setup() {
   setupIO();
   setupLightsAndBuzzer();
   
-  xTaskCreatePinnedToCore(ibus_task, "iBusTask", 4096, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(ibus_task, "iBusTask", 4096, NULL, 3, NULL, 0);
   delay(500);
   processIbusData();
 
@@ -180,14 +187,6 @@ void setup() {
   setupESCs();
   initAutopilot();
   boatStatus.vitals.battery_voltage = readBatteryVoltage();
-
-  esp_task_wdt_config_t wdt_config = {
-      .timeout_ms = 3000,
-      .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
-      .trigger_panic = true
-  };
-  esp_task_wdt_init(&wdt_config);
-  esp_task_wdt_add(NULL); 
 
   xTaskCreatePinnedToCore(webserver_task, "WebServerTask", 12288, NULL, 1, NULL, 0);
 }
@@ -220,7 +219,7 @@ void loop() {
                                      boatStatus.rc.channels[CH2] > FAILSAFE_CHANNEL_THRESHOLD &&
                                      boatStatus.rc.channels[CH3] > FAILSAFE_CHANNEL_THRESHOLD &&
                                      boatStatus.rc.channels[CH4] > FAILSAFE_CHANNEL_THRESHOLD);
-                                     
+
     static unsigned long lastHeartbeatCheck = 0;
     bool task_frozen = false;
 
@@ -249,13 +248,18 @@ void loop() {
         }
 
         if (failsafe_duration > FAILSAFE_RTH_TRIGGER_MS) {
-            if (boatStatus.mode.is_armed && homeIsSet && boatStatus.nav.has_gps_fix) {
+            bool has_fix = false;
+            if(xSemaphoreTake(boatStatusMutex, 5) == pdTRUE) {
+                has_fix = boatStatus.nav.has_gps_fix;
+                xSemaphoreGive(boatStatusMutex);
+            }
+
+            if (boatStatus.mode.is_armed && homeIsSet && has_fix) {
                 if (!boatStatus.autopilot.rth_active) {
                     resetForNewTarget(boatStatus, 0, true);
                 }
-                handleDynamicPID(boatStatus);
                 updateMotors(boatStatus);
-            } else if (boatStatus.mode.is_armed && !boatStatus.nav.has_gps_fix && boatStatus.mode.current == MANUAL_MODE && !boatStatus.autopilot.rth_active) {
+            } else if (boatStatus.mode.is_armed && !has_fix && boatStatus.mode.current == MANUAL_MODE && !boatStatus.autopilot.rth_active) {
                 handleCompassReturn(boatStatus);
             } else {
                 voidMotors();
@@ -267,6 +271,7 @@ void loop() {
         updateLights();
         esp_task_wdt_reset();
         return;
+
     } else {
         boatStatus.failsafe.rc_failsafe_start_ms = 0;
         boatStatus.failsafe.rc_signal_lost_ms = 0;
@@ -275,8 +280,6 @@ void loop() {
 
     if (now < 2000) return;
 
-    handleManualPidTuning(boatStatus);
-    handleDynamicPID(boatStatus);
     updateMotors(boatStatus);
     handleManualActuators(boatStatus);
     updateActuators();
@@ -369,38 +372,6 @@ void handleArming(BoatStatus& status) {
   }
 }
 
-void handleManualPidTuning(BoatStatus& status) {
-    if (status.mode.current == MANUAL_MODE || status.mode.current == LOCATION_SAVE_MODE) {
-        if(xSemaphoreTake(pidMutex, 5)){
-            steeringPID.Kp = map(status.rc.channels[CH9], 1000, 2000, 100, 700) / 100.0;
-            xSemaphoreGive(pidMutex);
-        }
-    }
-}
-
-void handleDynamicPID(BoatStatus& status) {
-    if (status.mode.current != AUTOPILOT_MODE || !status.autopilot.engaged) return;
-
-    if(xSemaphoreTake(pidMutex, 5)){
-        float baseKp = map(status.rc.channels[CH9], 1000, 2000, 100, 800) / 100.0;
-        float currentSpeed = status.nav.speed_mps;
-        
-        const float lowSpeedThreshold = 1.0;
-        const float highSpeedThreshold = 2.5;
-        const float highSpeedKpReduction = 0.5;
-
-        if (currentSpeed <= lowSpeedThreshold) {
-            steeringPID.Kp = baseKp * 1.5;
-        } else if (currentSpeed >= highSpeedThreshold) {
-            steeringPID.Kp = baseKp * (1.0 - highSpeedKpReduction);
-        } else {
-            float factor = (currentSpeed - lowSpeedThreshold) / (highSpeedThreshold - lowSpeedThreshold);
-            steeringPID.Kp = baseKp * (1.0 - (highSpeedKpReduction * factor));
-        }
-        xSemaphoreGive(pidMutex);
-    }
-}
-
 void setupIO() {
   for (int i = 0; i < NUM_ACTUATORS; i++) {
     pinMode(actuators[i].pin, OUTPUT);
@@ -418,7 +389,7 @@ void setupESCs() {
   escRight.attach(ESC_RIGHT_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
   escLeft.writeMicroseconds(RC_MID_POINT);
   escRight.writeMicroseconds(RC_MID_POINT);
-  delay(2000); 
+  delay(2000);
 }
 
 void setupLightsAndBuzzer() {
@@ -432,6 +403,16 @@ void setupLightsAndBuzzer() {
 void handleModes(BoatStatus& status) {
   int ch7Value = status.rc.channels[CH7];
   status.mode.previous = status.mode.current;
+
+  // AutoTune Override Logic
+  if (status.mode.current == AUTOTUNE_MODE) {
+      int throttle = status.rc.channels[CH3];
+      int steering = status.rc.channels[CH4];
+      if (abs(throttle - RC_MID_POINT) > 50 || abs(steering - RC_MID_POINT) > 50) {
+          status.mode.current = MANUAL_MODE; // Cancel on stick movement
+      }
+      return; 
+  }
 
   if (ch7Value <= MODE_MANUAL_MAX) {
       if(status.mode.current != ANCHOR_MODE) {
@@ -488,6 +469,7 @@ void handleModes(BoatStatus& status) {
   }
   else if (status.mode.current == AUTOPILOT_MODE) {
     RouteStatus route_status = ROUTE_INACTIVE;
+
     if(xSemaphoreTake(routeMutex, 5)) {
         route_status = currentRoute.status;
         xSemaphoreGive(routeMutex);
@@ -509,6 +491,7 @@ void handleCompassReturn(BoatStatus& status) {
   int baseSpeed = 1650; 
   int targetSpeedLeft = baseSpeed - steeringAdjust;
   int targetSpeedRight = baseSpeed + steeringAdjust;
+
   escLeft.writeMicroseconds(constrain(targetSpeedLeft, ESC_MIN_PULSE, ESC_MAX_PULSE));
   escRight.writeMicroseconds(constrain(targetSpeedRight, ESC_MIN_PULSE, ESC_MAX_PULSE));
 }
@@ -538,15 +521,17 @@ void updateMotors(BoatStatus& status) {
   }
   else if (status.mode.current == ANCHOR_MODE && status.nav.has_gps_fix) {
       double distance = calculateDistance(status.nav.latitude, status.nav.longitude, status.autopilot.anchor_lat, status.autopilot.anchor_lng);
-      
+
       if (distance > status.autopilot.anchor_radius) {
           double bearingToAnchor = calculateBearing(status.nav.latitude, status.nav.longitude, status.autopilot.anchor_lat, status.autopilot.anchor_lng);
+
           int steeringAdjust = calculateSteeringPID(status, bearingToAnchor);
           int position_throttle_adjust = calculateThrottlePID(status, distance);
           int combined_throttle_adjust = constrain(position_throttle_adjust, 0, 400);
 
           targetSpeedLeft  = RC_MID_POINT + combined_throttle_adjust - steeringAdjust;
           targetSpeedRight = RC_MID_POINT + combined_throttle_adjust + steeringAdjust;
+
       } else {
           int steeringAdjust = calculateSteeringPID(status, status.autopilot.anchor_heading);
           targetSpeedLeft = RC_MID_POINT + steeringAdjust;
@@ -556,14 +541,16 @@ void updateMotors(BoatStatus& status) {
   else if (status.mode.current == AUTOPILOT_MODE && status.autopilot.engaged && status.autopilot.target_waypoint_index != -1) {
     if (status.autopilot.arrival_state != AP_IDLE) {
       handleWaypointArrivalActions(status);
+
       if (status.autopilot.arrival_state == AP_BRAKING) {
           unsigned long braking_duration = millis() - status.autopilot.arrival_time_ms;
+
           if (braking_duration < 150) {
               escLeft.writeMicroseconds(RC_MID_POINT);
               escRight.writeMicroseconds(RC_MID_POINT);
           } else {
-              escLeft.writeMicroseconds(BRAKING_REVERSE_PULSE);
-              escRight.writeMicroseconds(BRAKING_REVERSE_PULSE);
+              escLeft.writeMicroseconds(1300);
+              escRight.writeMicroseconds(1300);
           }
       }
       return;
@@ -571,7 +558,7 @@ void updateMotors(BoatStatus& status) {
     
     double targetLat = 0, targetLng = 0;
     bool has_actions = false;
-    
+
     if(xSemaphoreTake(dataMutex, 10)){
         targetLat = savedLocations[status.autopilot.target_waypoint_index].lat;
         targetLng = savedLocations[status.autopilot.target_waypoint_index].lng;
@@ -594,11 +581,11 @@ void updateMotors(BoatStatus& status) {
     }
 
     double distance = calculateDistance(status.nav.latitude, status.nav.longitude, targetLat, targetLng);
-    float dynamic_braking_dist = max(MIN_BRAKING_DISTANCE, status.nav.speed_mps * BRAKING_FACTOR);
+    float dynamic_braking_dist = status.autopilot.braking_distance;
     
     bool is_continuous_mapping = (route_status == ROUTE_ACTIVE && route_step < (wp_count - 1) && !has_actions);
-    
     bool plane_crossed = false;
+
     if (status.autopilot.origin_lat != 0.0) {
         plane_crossed = checkPlaneCrossing(status.autopilot.origin_lat, status.autopilot.origin_lng, targetLat, targetLng, status.nav.latitude, status.nav.longitude);
     }
@@ -621,7 +608,6 @@ void updateMotors(BoatStatus& status) {
     }
 
     status.autopilot.arrival_state = AP_IDLE;
-    
     double courseError = abs(calculateCourseError(status, targetLat, targetLng));
     int steeringAdjust = calculateSteeringPID(status, targetLat, targetLng);
 
@@ -632,33 +618,20 @@ void updateMotors(BoatStatus& status) {
     
     targetSpeedLeft = baseSpeed + steeringAdjust;
     targetSpeedRight = baseSpeed - steeringAdjust;
-    
-  } else {
+
+  } 
+  else if (status.mode.current == AUTOTUNE_MODE) {
+      handleAutoTune(status, targetSpeedLeft, targetSpeedRight);
+  } 
+  else {
       voidMotors();
   }
-
-  double distToTarget = 0.0;
-  double desiredHeading = 0.0;
-  if (status.mode.current == AUTOPILOT_MODE && status.autopilot.target_waypoint_index != -1) {
-      extern SavedLocation savedLocations[5];
-      distToTarget = calculateDistance(status.nav.latitude, status.nav.longitude, savedLocations[status.autopilot.target_waypoint_index].lat, savedLocations[status.autopilot.target_waypoint_index].lng);
-      desiredHeading = calculateCourseError(status, savedLocations[status.autopilot.target_waypoint_index].lat, savedLocations[status.autopilot.target_waypoint_index].lng) + status.nav.heading;
-  }
-  
-  logTelemetryData(status, smoothedLeft, smoothedRight, fmod(desiredHeading+360.0, 360.0), distToTarget);
 
   smoothedLeft = MOTOR_SMOOTHING_ALPHA * targetSpeedLeft + (1 - MOTOR_SMOOTHING_ALPHA) * smoothedLeft;
   smoothedRight = MOTOR_SMOOTHING_ALPHA * targetSpeedRight + (1 - MOTOR_SMOOTHING_ALPHA) * smoothedRight;
 
   escLeft.writeMicroseconds(constrain(smoothedLeft, ESC_MIN_PULSE, ESC_MAX_PULSE));
   escRight.writeMicroseconds(constrain(smoothedRight, ESC_MIN_PULSE, ESC_MAX_PULSE));
-}
-
-void voidMotors() {
-  escLeft.writeMicroseconds(RC_MID_POINT);
-  escRight.writeMicroseconds(RC_MID_POINT);
-  smoothedLeft = RC_MID_POINT;
-  smoothedRight = RC_MID_POINT;
 }
 
 void handleManualActuators(BoatStatus& status) {
@@ -704,6 +677,7 @@ void handleManualActuators(BoatStatus& status) {
 
 void updateActuators() {
     unsigned long now = millis();
+
     for (int i = 0; i < NUM_ACTUATORS; i++) {
         if (actuators[i].active && actuators[i].onTime > 0 && (now - actuators[i].activatedAt >= actuators[i].onTime)) {
             actuators[i].active = false;
@@ -792,7 +766,6 @@ void manageAllBuzzerAlerts() {
 void updateSingleFlashPattern(FlashPatternControl& pattern) {
     if (!pattern.active) { pattern.currentlyOn = false; return; }
     unsigned long now = millis();
-
     if (now >= pattern.nextToggleTime) {
          if (!pattern.currentlyOn) {
             pattern.currentToggle++;
@@ -842,7 +815,6 @@ void updateLights() {
   }
 
   byte bitsToSend = ~logicalOnState;
-
   if (isBuzzerOn) {
     bitsToSend |= BUZZER_MASK;
   } else {
@@ -894,4 +866,11 @@ void startFlashPattern(FlashPatternControl& pattern, const AlertSetting& setting
     pattern.offDuration = settings.flashOffDuration;
     pattern.flashMask = settings.flashMask;
     pattern.currentlyOn = false;
+}
+
+void voidMotors() {
+  escLeft.writeMicroseconds(RC_MID_POINT);
+  escRight.writeMicroseconds(RC_MID_POINT);
+  smoothedLeft = RC_MID_POINT;
+  smoothedRight = RC_MID_POINT;
 }
